@@ -1,0 +1,40 @@
+name: Trivy scan
+description: >
+  Runs an Aqua Trivy scan (vulnerability or secret mode) against the checked-out repo.
+  Replaces the apt-get install curl/ca-certificates + aquasecurity/trivy-action steps
+  duplicated verbatim across mecha-industries repos' security.yml/pr.yml files. Intended
+  to run inside a job with `container: image: ubuntu:22.04` (or any image lacking curl).
+
+inputs:
+  scanners:
+    description: Trivy scanner(s) to run - "vuln" or "secret".
+    required: true
+  severity:
+    description: Comma-separated severity levels to fail on.
+    required: false
+    default: "HIGH,CRITICAL"
+  scan-ref:
+    description: Path to scan.
+    required: false
+    default: "."
+  trivy-action-version:
+    description: Pinned aquasecurity/trivy-action version.
+    required: false
+    default: "v0.36.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Install curl (needed by trivy-action's own installer)
+      shell: bash
+      run: apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+
+    - name: Run Trivy
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        scan-type: fs
+        scan-ref: ${{ inputs.scan-ref }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        exit-code: "1"
+        format: table
