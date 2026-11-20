@@ -20,12 +20,20 @@ version bump lands once, not once per repo.
 
 | Path | Purpose |
 |------|---------|
-| `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
-| `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
+| `.github/actions/actionlint/` | Runs `rhysd/actionlint` against the checked-out repo's workflow YAML and exposes `outcome`/`report` outputs — never fails the job itself. |
 | `.github/actions/ci-failure-ticket/` | Checks out the repo and runs its own ticket-filing script to file a Linear ticket for a failed CI job — replaces the checkout + "File CI failure ticket" step pair duplicated near byte-for-byte across every consuming repo's `security.yml`/`ci.yml`/`main.yml` `ci-failure-ticket` jobs. The caller's job keeps its own `needs:`/`if: always() && contains(needs.*.result, 'failure')` gating. |
+| `.github/actions/commit-and-push-writeback/` | Stages, commits, and pushes generated files directly to the default branch, with fetch/rebase/push retry over concurrent pushes — replaces the writeback mechanics duplicated across mecha10-api/mecha10-dashboard/mecha10-rl's `update-status-table` jobs. |
 | `.github/actions/deps-changes/` | Runs `dorny/paths-filter` to detect dependency-manifest changes — replaces the `changes` job body duplicated across consuming repos' `security.yml` files. |
+| `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
+| `.github/actions/file-linear-tickets/` | Files a deduped Linear ticket for every failed entry in a JSON report file, from a single job instead of one ticket-filing step per scan job — hoisted from mecha10/mecha10-api/mecha10-dashboard. |
+| `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
 
 ## Usage
+
+Pin to a tag once this repo cuts a first release; `@main` is fine for the initial rollout while
+this is still new.
+
+### trivy-scan
 
 From a consuming repo's workflow, inside a job running `container: image: ubuntu:22.04`:
 
@@ -38,10 +46,11 @@ steps:
       severity: HIGH,CRITICAL
 ```
 
-Pin to a tag once this repo cuts a first release; `@main` is fine for the initial rollout while
-this is still new.
-
-Optional inputs for repos that need them:
+Inputs:
+- `scanners` (required) - Trivy scanner(s) to run: `vuln` or `secret`.
+- `severity` (default `HIGH,CRITICAL`) - comma-separated severity levels to fail on.
+- `scan-ref` (default `.`) - path to scan.
+- `trivy-action-version` (default `v0.36.0`) - pinned `aquasecurity/trivy-action` version.
 - `resilient-install: "true"` - downloads the Trivy binary directly from GitHub's
   releases/download CDN with a retry loop instead of letting `trivy-action`'s own
   `setup-trivy` installer run (its version-lookup call is flaky under load). Pair with
@@ -52,14 +61,17 @@ Optional inputs for repos that need them:
 - `cache-db: "true"` - caches the Trivy vulnerability DB in `.cache/trivy` with a date-keyed
   `actions/cache` key (`trivy-db-YYYY-MM-DD`, falling back to any `trivy-db-` prefix match) and
   passes `cache: false` / `cache-dir: .cache/trivy` to `trivy-action`, instead of letting
-  `trivy-action` manage its own cache. Pair with `cache-write: "true"` on exactly one trigger
-  (conventionally push-to-main) so that trigger writes a day's DB entry via `actions/cache`;
-  every other trigger (PRs, other branches) should leave `cache-write` unset/`"false"` so it only
-  reads via `actions/cache/restore`, avoiding multiple jobs racing to write the same multi-hundred-MB
-  entry.
+  `trivy-action` manage its own cache.
+- `cache-write` (default `"false"`) - only used when `cache-db` is `"true"`. Set to `"true"` on
+  exactly one trigger (conventionally push-to-main) so that trigger writes a day's DB entry via
+  `actions/cache`; every other trigger (PRs, scheduled runs, other branches) must leave
+  `cache-write` unset/`"false"` so it only reads via `actions/cache/restore` — otherwise multiple
+  runs race to write the same multi-hundred-MB cache entry.
 
-All of the above are purely additive and off by default, so existing callers passing neither
-`cache-db` nor `cache-write` are unaffected.
+All of the cache-related inputs are purely additive and off by default, so existing callers
+passing neither `cache-db` nor `cache-write` are unaffected.
+
+### fail-if-required-failed
 
 From a consuming repo's `required-checks` job:
 
@@ -74,10 +86,12 @@ required-checks:
     - uses: mecha-industries/mecha10-actions/.github/actions/fail-if-required-failed@main
 ```
 
-A composite action can't contribute edges to another job's `needs:` graph — GitHub must be able
-to parse those edges ahead of time as literal job names — so the caller's `required-checks` job
-must still declare `if: always()` and list every real gate in its own `needs:`. This action only
-centralizes the body that checks their results.
+No inputs. A composite action can't contribute edges to another job's `needs:` graph — GitHub
+must be able to parse those edges ahead of time as literal job names — so the caller's
+`required-checks` job must still declare `if: always()` and list every real gate in its own
+`needs:`. This action only centralizes the body that checks their results.
+
+### ci-failure-ticket
 
 For the `ci-failure-ticket` job in a consuming repo's workflow, the caller keeps the job-level
 `needs:`/`if:` gating and delegates the step body:
@@ -98,8 +112,17 @@ ci-failure-ticket:
         linear-api-key: ${{ secrets.LINEAR_API_KEY }}
 ```
 
-Pass `script-path` only if the repo's ticket-filing script isn't at the default
-`scripts/ci/file-ci-failure-ticket.sh` (e.g. `scripts/file-ci-failure-ticket.sh`).
+Inputs:
+- `workflow-name` (required) - human-readable label for the failed workflow, passed as the
+  script's first argument (e.g. `"Security Scan"`, `"CI"`).
+- `linear-api-key` (required) - Linear API key, e.g. `${{ secrets.LINEAR_API_KEY }}`.
+- `script-path` (default `scripts/ci/file-ci-failure-ticket.sh`) - path to the repo's own
+  ticket-filing script. Pass this only if the repo's script isn't at the default path (e.g.
+  `scripts/file-ci-failure-ticket.sh`).
+
+The caller's job still owns the `needs: [...]` and `if: always() && contains(needs.*.result,
+'failure')` gating and the `ci-failure-ticket` job name itself — those are job-level edges that
+cannot move into a composite action.
 
 ### deps-changes
 
@@ -125,12 +148,133 @@ jobs:
         id: filter
 ```
 
-The default `filters` input is the broad polyglot dependency-manifest list (`package.json`,
-`yarn.lock`, `pnpm-lock.yaml`, `Cargo.toml`, `Cargo.lock`, `requirements*.txt`, `pyproject.toml`,
-`Gemfile`, `Gemfile.lock`, `go.mod`, `go.sum`) — a superset of any single-ecosystem repo's
-narrower list, so Rust-only repos (e.g. mecha10-nodes) get identical behavior from the default
-without passing anything. Pass `filters` with a full `paths-filter` `filters:` block to override
-it for repos that want something narrower or different.
+Inputs:
+- `filters` (optional) - `paths-filter` `filters:` YAML block. Defaults to the broad polyglot
+  dependency-manifest list (`package.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.toml`,
+  `Cargo.lock`, `requirements*.txt`, `pyproject.toml`, `Gemfile`, `Gemfile.lock`, `go.mod`,
+  `go.sum`) — a superset of any single-ecosystem repo's narrower list, so Rust-only repos (e.g.
+  mecha10-nodes) get identical behavior from the default without passing anything. Pass `filters`
+  to narrow or otherwise customize the list for repos that want something different.
+
+A composite action can't contribute edges to another job's `needs:` graph or declare job-level
+`if:`/`permissions:`/`outputs:`, so the caller's `changes` job must still declare its own `if:`,
+`runs-on:`, `permissions: { contents: read, pull-requests: read }` (`pull-requests: read` is
+required by `paths-filter` on `pull_request` events), and an `outputs:` mapping that re-exports
+this action's `deps` output.
+
+### actionlint
+
+```yaml
+steps:
+  - id: lint
+    uses: mecha-industries/mecha10-actions/.github/actions/actionlint@main
+    with:
+      actionlint-version: "1.7.12"
+
+  - name: Fail on actionlint findings
+    if: steps.lint.outputs.outcome == 'failure'
+    run: exit 1
+```
+
+Inputs:
+- `actionlint-version` (default `"1.7.12"`) - pinned `actionlint` version passed to
+  `download-actionlint.bash`. Never `"latest"`.
+
+Outputs:
+- `outcome` - `success` or `failure`, the scan step's own outcome.
+- `report` - contents of `actionlint-report.txt` (or a placeholder if it wasn't written).
+
+This action **never fails the job itself** — it always runs the scan with `continue-on-error` and
+exposes `outcome`/`report` as outputs instead. A caller that wants a hard gate must add its own
+`if: steps.<id>.outputs.outcome == 'failure'` -> `exit 1` step right after using this action, as
+shown above; a caller that wants to capture the report for downstream ticket-filing or PR comments
+can consume the outputs directly instead.
+
+### file-linear-tickets
+
+```yaml
+steps:
+  - name: Write report entries
+    run: |
+      cat > "${{ runner.temp }}/file-linear-tickets-entries.json" <<EOF
+      [
+        {"name": "trivy-vuln", "outcome": "${{ needs.trivy-vuln.outputs.outcome }}", "report": ${{ toJSON(needs.trivy-vuln.outputs.report) }}, "groups": "[]"}
+      ]
+      EOF
+
+  - uses: mecha-industries/mecha10-actions/.github/actions/file-linear-tickets@main
+    with:
+      entries-file: ${{ runner.temp }}/file-linear-tickets-entries.json
+      linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+      pr-number: ${{ github.event.pull_request.number }}
+      pr-url: ${{ github.event.pull_request.html_url }}
+      run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      script-path: scripts/ci/file-linear-ticket.sh
+```
+
+Inputs:
+- `entries-file` (required) - path to a file holding a JSON array of `{name, outcome, report,
+  groups}` objects, one per upstream job. `outcome` is that job's `outputs.outcome` (only
+  `"failure"` entries file a ticket). `groups` is optional (omit, or pass `"[]"`, for jobs that
+  don't produce a groups file).
+- `linear-api-key` (required) - Linear GraphQL API key, forwarded to the filing script as
+  `LINEAR_API_KEY`.
+- `pr-number` (required) - pull request number, forwarded as `PR_NUMBER`.
+- `pr-url` (required) - pull request HTML URL, forwarded as `PR_URL`.
+- `run-url` (required) - workflow run URL, forwarded as `RUN_URL`.
+- `script-path` (required, no default) - path, relative to the caller's checked-out repo, to that
+  repo's own ticket-filing script (e.g. `scripts/ci/file-linear-ticket.sh`,
+  `services/api/scripts/file-linear-ticket.sh`). The existing callers' scripts diverge in
+  team/label IDs and dedup details, so each caller keeps its own script and passes its path here.
+
+**`entries-file` is a file path, never inline JSON, on purpose.** A composite action's inputs
+become plain environment variables under the hood — packing every upstream job's full report text
+into one env var can exceed Linux's per-process exec limit (`MAX_ARG_STRLEN`, 128KB) and fail the
+whole step with an opaque "Argument list too long" (this has happened in production). Write the
+JSON to disk with a `run:` step (no such limit there) and pass its path instead, e.g.
+`${{ runner.temp }}/file-linear-tickets-entries.json`.
+
+### commit-and-push-writeback
+
+```yaml
+update-status-table:
+  name: update-status-table
+  if: "!contains(github.event.head_commit.message, 'chore: update status table')"
+  concurrency:
+    group: update-status-table-${{ github.ref }}
+  permissions:
+    contents: write
+  runs-on: arc-catfood-minimal
+  timeout-minutes: 10
+  steps:
+    - run: ./scripts/generate-status-table.sh
+    - uses: mecha-industries/mecha10-actions/.github/actions/commit-and-push-writeback@main
+      with:
+        gh-pat: ${{ secrets.GH_PAT }}
+        paths: STATUS.md
+        commit-message: "chore: update status table"
+```
+
+Inputs:
+- `gh-pat` (required) - a PAT (not `GITHUB_TOKEN`) with Contents: read/write on this repo, passed
+  as `${{ secrets.GH_PAT }}`. `GITHUB_TOKEN` cannot push straight past branch protection, so this
+  action fails loudly if `gh-pat` is empty instead of silently falling back or failing with an
+  opaque auth error.
+- `paths` (required) - newline- or space-separated file path(s) to stage and commit.
+- `commit-message` (required) - commit message for the writeback commit.
+- `target-branch` (default `"main"`) - branch to push the writeback commit to.
+- `max-retries` (default `"3"`) - number of fetch/rebase/push attempts before failing the step.
+
+This action pushes directly to a protected default branch using a PAT, rebasing over any
+concurrent commit that lands on the target branch between checkout and push. It never
+force-pushes and never hard-resets over the remote branch — a rebase conflict fails the step
+loudly instead of silently discarding either side. What stays out of scope, and must stay in the
+caller: the content generation itself (what changed and which script built it), and the job-level
+`needs:`, `concurrency:`, `permissions: contents: write`, and `if:` skip guard — a composite
+action cannot contribute to another job's `needs:` graph or declare job-level
+`if:`/`concurrency:`/`permissions:`, so the calling job must keep declaring all of those,
+including an `if:` that skips runs whose own commit message matches `commit-message` above (so
+this job's writeback commit doesn't retrigger itself).
 
 ## Adding more shared actions
 

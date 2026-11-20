@@ -31,6 +31,6 @@ runs:
         LINEAR_API_KEY: ${{ inputs.linear-api-key }}
         GITHUB_REPOSITORY: ${{ github.repository }}
       run: |
-        bash ${{ inputs.script-path }} \
+        bash "${{ inputs.script-path }}" \
           "${{ inputs.workflow-name }}" \
           "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
