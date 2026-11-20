@@ -138,6 +138,7 @@ jobs:
     runs-on: ${{ inputs.minimal-runner-label }}
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v7
       - uses: mecha-industries/mecha10-actions/.github/actions/trivy-scan@main
         with:
           scanners: vuln
@@ -159,6 +160,7 @@ jobs:
     runs-on: ${{ inputs.minimal-runner-label }}
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v7
       - uses: mecha-industries/mecha10-actions/.github/actions/trivy-scan@main
         with:
           scanners: secret
