@@ -81,18 +81,21 @@ on:
         description: Whether to run the required-checks aggregate gate job (changes, trivy-vuln, trivy-secret).
         type: boolean
         default: true
-      runner-label:
-        description: Runner label for the trivy-vuln/trivy-secret jobs (needs Docker CLI to run a container job).
-        type: string
-        default: 'arc-catfood-docker'
       minimal-runner-label:
-        description: Runner label for the changes/required-checks/ci-failure-ticket jobs (no toolchain needed).
+        description: >
+          Runner label for all jobs, including trivy-vuln/trivy-secret: trivy-scan is invoked with
+          direct-binary: true, so no Docker CLI / container job is required.
         type: string
         default: 'arc-catfood-minimal'
-      container-image:
-        description: Container image for the trivy-vuln/trivy-secret jobs. trivy-scan installs curl itself inside it.
-        type: string
-        default: 'ubuntu:22.04'
+    outputs:
+      deps:
+        description: Whether any dependency manifest matched (the `changes` job's `deps` output).
+        value: ${{ jobs.changes.outputs.deps }}
+      changes:
+        description: >
+          JSON array of the `changes` job's matched filter keys, for a monorepo caller to gate its
+          own downstream jobs per package, e.g. `contains(fromJSON(needs.security-scan.outputs.changes), 'crate-a')`.
+        value: ${{ jobs.changes.outputs.changes }}
 
 permissions:
   contents: read
@@ -107,7 +110,11 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      deps: ${{ steps.filter.outputs.deps || steps.filter-custom.outputs.deps }}
+      # Branches explicitly on which step ran (inputs.deps-filters) rather than on step output
+      # truthiness: the skipped step's output is '', but the string "false" from the step that did
+      # run is also truthy in a GitHub `||` expression, so `a || b` would be fragile here.
+      deps: ${{ inputs.deps-filters == '' && steps.filter.outputs.deps || steps.filter-custom.outputs.deps }}
+      changes: ${{ inputs.deps-filters == '' && steps.filter.outputs.changes || steps.filter-custom.outputs.changes }}
     steps:
       - id: filter
         if: inputs.deps-filters == ''
@@ -128,10 +135,7 @@ jobs:
        github.event_name == 'schedule' ||
        (inputs.vuln-always-on-push && github.event_name == 'push') ||
        needs.changes.outputs.deps == 'true')
-    runs-on: ${{ inputs.runner-label }}
-    container:
-      image: ${{ inputs.container-image }}
-      options: --cpus=1 --memory=1Gi
+    runs-on: ${{ inputs.minimal-runner-label }}
     timeout-minutes: 20
     steps:
       - uses: mecha-industries/mecha10-actions/.github/actions/trivy-scan@main
@@ -145,16 +149,14 @@ jobs:
           java-db-repository: ${{ inputs.java-db-repository }}
           cache-db: ${{ inputs.cache-db }}
           cache-write: ${{ inputs.cache-write }}
+          direct-binary: true
 
   trivy-secret:
     name: Trivy secret scan
     # Deliberately not gated by `changes` (unlike trivy-vuln): a secret can be introduced by
     # any file change, not just a dependency-manifest change.
     if: always() && inputs.enable-secret
-    runs-on: ${{ inputs.runner-label }}
-    container:
-      image: ${{ inputs.container-image }}
-      options: --cpus=1 --memory=1Gi
+    runs-on: ${{ inputs.minimal-runner-label }}
     timeout-minutes: 20
     steps:
       - uses: mecha-industries/mecha10-actions/.github/actions/trivy-scan@main
@@ -164,6 +166,7 @@ jobs:
           scan-ref: ${{ inputs.scan-ref }}
           resilient-install: ${{ inputs.resilient-install }}
           trivy-version: ${{ inputs.trivy-version }}
+          direct-binary: true
 
   required-checks:
     name: Security Scan required checks

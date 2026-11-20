@@ -291,6 +291,16 @@ seven current `security.yml` callers diverge (gating formula, Trivy DB mirror, c
 path, whether `required-checks`/`changes` even exist) is a `workflow_call` input - see the input
 descriptions in `security-scan.yml` itself for the full list and defaults.
 
+Every job, including `trivy-vuln`/`trivy-secret`, runs on the single `minimal-runner-label` runner
+(default `arc-catfood-minimal`) with no `container:` block: `trivy-scan` is called with
+`direct-binary: true`, which downloads the Trivy binary and runs it from a plain shell step instead
+of delegating to the Docker-container `aquasecurity/trivy-action`, so no Docker CLI on the runner
+host is needed. The workflow also exposes a top-level `workflow_call` `changes` output (alongside
+the existing `deps` output), passed through from the `changes` job's `deps-changes` call - for a
+monorepo caller whose `deps-filters` defines one key per package, the CALLING workflow can gate its
+own downstream jobs per package off this output, e.g.
+`contains(fromJSON(needs.security-scan.outputs.changes), 'crate-a')`.
+
 Add this to a consuming repo's `.github/workflows/security.yml` (adjust the `on:` triggers and
 `with:` inputs for that repo's current behavior):
 
