@@ -1,0 +1,99 @@
+name: Commit and push writeback
+description: >
+  Stages the given paths, commits them, and pushes the commit directly to the repo's
+  default branch, rebasing over any concurrent commit (a parallel PR merge, a version-bump
+  push, etc.) that lands on that branch between checkout and push - retrying the
+  fetch/rebase/push cycle up to `max-retries` times. Centralizes the writeback mechanics
+  duplicated across the `update-status-table` jobs in mecha10-api, mecha10-dashboard, and
+  mecha10-rl. Never force-pushes and never hard-resets over the remote branch; a rebase
+  conflict (someone else editing the same generated file) fails the step loudly instead of
+  silently discarding either side. What stays out of scope, and must stay in the caller: the
+  content generation itself (what changed and which script built it), and the job-level
+  `needs:`, `concurrency:`, `permissions: contents: write`, and `if:` skip guard - a
+  composite action cannot contribute to another job's `needs:` graph or declare job-level
+  `if:`/`concurrency:`/`permissions:`, so the calling job must keep declaring all of those,
+  including an `if:` that skips runs whose own commit message matches `commit-message` below
+  (so this job's writeback commit doesn't retrigger itself).
+
+inputs:
+  gh-pat:
+    description: >
+      A PAT (not GITHUB_TOKEN) with Contents: read/write on this repo, passed by the caller
+      as `${{ secrets.GH_PAT }}`. GITHUB_TOKEN cannot push straight past branch protection,
+      so a composite action step fails loudly here instead of checkout silently falling back
+      to GITHUB_TOKEN or failing with an opaque auth error.
+    required: true
+  paths:
+    description: Newline- or space-separated file path(s) to stage and commit.
+    required: true
+  commit-message:
+    description: Commit message for the writeback commit.
+    required: true
+  target-branch:
+    description: Branch to push the writeback commit to.
+    required: false
+    default: "main"
+  max-retries:
+    description: Number of fetch/rebase/push attempts before failing the step.
+    required: false
+    default: "3"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify gh-pat is configured
+      shell: bash
+      env:
+        GH_PAT: ${{ inputs.gh-pat }}
+      run: |
+        if [ -z "$GH_PAT" ]; then
+          echo "::error::gh-pat input is empty. This action pushes directly to a protected branch and requires a real PAT (not GITHUB_TOKEN) - pass secrets.GH_PAT (a PAT with at least Contents: read/write) from the calling repo."
+          exit 1
+        fi
+
+    - name: Checkout code
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        token: ${{ inputs.gh-pat }}
+
+    - name: Configure git identity
+      shell: bash
+      run: |
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "GitHub Actions"
+
+    - name: Commit and push with rebase retry
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-pat }}
+        WRITEBACK_PATHS: ${{ inputs.paths }}
+        WRITEBACK_COMMIT_MESSAGE: ${{ inputs.commit-message }}
+        WRITEBACK_TARGET_BRANCH: ${{ inputs.target-branch }}
+        WRITEBACK_MAX_RETRIES: ${{ inputs.max-retries }}
+      run: |
+        set -euo pipefail
+
+        git add -- $WRITEBACK_PATHS
+
+        if git diff --cached --quiet; then
+          echo "No change to commit, nothing to push"
+          exit 0
+        fi
+
+        git commit -m "$WRITEBACK_COMMIT_MESSAGE"
+
+        attempt=1
+        until git push origin "HEAD:${WRITEBACK_TARGET_BRANCH}"; do
+          if [ "$attempt" -ge "$WRITEBACK_MAX_RETRIES" ]; then
+            echo "::error::Failed to push writeback commit to ${WRITEBACK_TARGET_BRANCH} after ${WRITEBACK_MAX_RETRIES} attempts"
+            exit 1
+          fi
+
+          echo "Push rejected (most likely a concurrent commit landed on ${WRITEBACK_TARGET_BRANCH}) - resyncing and retrying (attempt $((attempt + 1))/${WRITEBACK_MAX_RETRIES})"
+          attempt=$((attempt + 1))
+          sleep 5
+
+          git fetch origin "$WRITEBACK_TARGET_BRANCH"
+          git rebase "origin/${WRITEBACK_TARGET_BRANCH}"
+        done
