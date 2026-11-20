@@ -1,0 +1,47 @@
+name: Dependency manifest changes
+description: >
+  Runs dorny/paths-filter to detect whether any dependency-manifest file changed, replacing the
+  `changes` job body duplicated across mecha-industries repos' security.yml files. The default
+  `filters` input is the broad polyglot list (package.json/yarn.lock/pnpm-lock.yaml, Cargo.toml/
+  Cargo.lock, requirements*.txt/pyproject.toml, Gemfile/Gemfile.lock, go.mod/go.sum) from
+  mecha10-rl's job; it is a strict superset of mecha10-nodes' Rust-only list, so Rust-only repos
+  get identical behavior from the default (no non-Rust manifests exist there to match) and don't
+  need to pass anything. Pass `filters` to narrow or otherwise customize the list. Job-level
+  concerns can't live in a composite action: the caller's `changes` job must still declare its own
+  `if: github.event_name != 'schedule'`, `runs-on:`, `permissions: { contents: read,
+  pull-requests: read }` (pull-requests: read is required by paths-filter on pull_request events),
+  and an `outputs: { deps: ... }` mapping that re-exports this action's `deps` output.
+
+inputs:
+  filters:
+    description: >
+      paths-filter `filters:` YAML block. Defaults to the broad polyglot dependency-manifest list;
+      override to narrow or extend it.
+    required: false
+    default: |
+      deps:
+        - '**/package.json'
+        - '**/yarn.lock'
+        - '**/pnpm-lock.yaml'
+        - '**/Cargo.toml'
+        - '**/Cargo.lock'
+        - '**/requirements*.txt'
+        - '**/pyproject.toml'
+        - '**/Gemfile'
+        - '**/Gemfile.lock'
+        - '**/go.mod'
+        - '**/go.sum'
+
+outputs:
+  deps:
+    description: Whether any dependency manifest matched the filters.
+    value: ${{ steps.filter.outputs.deps }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+    - uses: dorny/paths-filter@v4
+      id: filter
+      with:
+        filters: ${{ inputs.filters }}

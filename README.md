@@ -23,6 +23,7 @@ version bump lands once, not once per repo.
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
 | `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
 | `.github/actions/ci-failure-ticket/` | Checks out the repo and runs its own ticket-filing script to file a Linear ticket for a failed CI job — replaces the checkout + "File CI failure ticket" step pair duplicated near byte-for-byte across every consuming repo's `security.yml`/`ci.yml`/`main.yml` `ci-failure-ticket` jobs. The caller's job keeps its own `needs:`/`if: always() && contains(needs.*.result, 'failure')` gating. |
+| `.github/actions/deps-changes/` | Runs `dorny/paths-filter` to detect dependency-manifest changes — replaces the `changes` job body duplicated across consuming repos' `security.yml` files. |
 
 ## Usage
 
@@ -99,6 +100,37 @@ ci-failure-ticket:
 
 Pass `script-path` only if the repo's ticket-filing script isn't at the default
 `scripts/ci/file-ci-failure-ticket.sh` (e.g. `scripts/file-ci-failure-ticket.sh`).
+
+### deps-changes
+
+Replaces the `changes` job body duplicated across consuming repos' `security.yml` files
+(dependency-manifest change detection via `dorny/paths-filter`). Job-level concerns — `if:`,
+`runs-on:`, `permissions:`, and `outputs:` — can't live in a composite action, so the caller's
+job still declares them itself and re-exports the action's `deps` output:
+
+```yaml
+jobs:
+  changes:
+    name: changes
+    if: github.event_name != 'schedule'
+    runs-on: arc-catfood-minimal
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deps: ${{ steps.filter.outputs.deps }}
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/deps-changes@main
+        id: filter
+```
+
+The default `filters` input is the broad polyglot dependency-manifest list (`package.json`,
+`yarn.lock`, `pnpm-lock.yaml`, `Cargo.toml`, `Cargo.lock`, `requirements*.txt`, `pyproject.toml`,
+`Gemfile`, `Gemfile.lock`, `go.mod`, `go.sum`) — a superset of any single-ecosystem repo's
+narrower list, so Rust-only repos (e.g. mecha10-nodes) get identical behavior from the default
+without passing anything. Pass `filters` with a full `paths-filter` `filters:` block to override
+it for repos that want something narrower or different.
 
 ## Adding more shared actions
 
