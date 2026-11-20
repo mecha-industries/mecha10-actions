@@ -1,0 +1,16 @@
+name: Fail if required failed
+description: >
+  Fails the job if any job in `needs:` resulted in failure or cancellation. Centralizes the
+  single step duplicated byte-for-byte across every `required-checks` job in mecha-industries
+  repos. Note: a composite action cannot contribute edges to another job's `needs:` graph -
+  GitHub must be able to parse those edges ahead of time as literal job names - so the calling
+  `required-checks` job must still declare `if: always()` and list every real gate in its own
+  `needs:`. This action only centralizes the body that checks their results.
+
+runs:
+  using: composite
+  steps:
+    - name: Fail if any required job failed or was cancelled
+      if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      shell: bash
+      run: exit 1
