@@ -75,7 +75,9 @@ runs:
       run: |
         set -o pipefail
         PACKAGES=""
-        command -v curl >/dev/null 2>&1 || PACKAGES="$PACKAGES curl ca-certificates"
+        command -v curl >/dev/null 2>&1 || PACKAGES="$PACKAGES curl"
+        # ca-certificates must be ensured independently of curl: a bare ubuntu image ships no CA bundle at all.
+        [ -f /etc/ssl/certs/ca-certificates.crt ] || PACKAGES="$PACKAGES ca-certificates"
         if [ "${{ inputs.resilient-install }}" == "true" ] || [ "${{ inputs.direct-binary }}" == "true" ]; then
           command -v tar >/dev/null 2>&1 || PACKAGES="$PACKAGES tar"
         fi
