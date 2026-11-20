@@ -46,8 +46,17 @@ Optional inputs for repos that need them:
 - `db-repository` / `java-db-repository` - override `TRIVY_DB_REPOSITORY` /
   `TRIVY_JAVA_DB_REPOSITORY` (e.g. to point at a `ghcr.io` mirror), same as mecha10-deploy's
   job does today. Leave unset to use Trivy's own defaults.
+- `cache-db: "true"` - caches the Trivy vulnerability DB in `.cache/trivy` with a date-keyed
+  `actions/cache` key (`trivy-db-YYYY-MM-DD`, falling back to any `trivy-db-` prefix match) and
+  passes `cache: false` / `cache-dir: .cache/trivy` to `trivy-action`, instead of letting
+  `trivy-action` manage its own cache. Pair with `cache-write: "true"` on exactly one trigger
+  (conventionally push-to-main) so that trigger writes a day's DB entry via `actions/cache`;
+  every other trigger (PRs, other branches) should leave `cache-write` unset/`"false"` so it only
+  reads via `actions/cache/restore`, avoiding multiple jobs racing to write the same multi-hundred-MB
+  entry.
 
-Both are purely additive and off by default, so existing callers are unaffected.
+All of the above are purely additive and off by default, so existing callers passing neither
+`cache-db` nor `cache-write` are unaffected.
 
 ## Adding more shared actions
 
