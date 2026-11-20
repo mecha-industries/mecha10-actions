@@ -1,0 +1,55 @@
+name: actionlint
+description: >
+  Runs rhysd/actionlint against the checked-out repo's workflow YAML. Replaces two
+  duplicated implementations: mecha10's inline `actionlint` job in .github/workflows/pr.yml,
+  and mecha10-api's own per-repo .github/actions/actionlint/action.yml. Like labone-actions'
+  scan-with-report/trivy-scan actions, this action never fails the job itself - it always
+  runs the scan with continue-on-error and exposes `outcome` and `report` as outputs. A
+  caller that wants a hard gate (mecha10-api's shape) must add its own
+  `if: steps.<id>.outputs.outcome == 'failure'` -> `exit 1` step right after using this
+  action; a caller that wants to capture the report for downstream ticket-filing or PR
+  comments (mecha10's shape) can consume the outputs directly instead.
+
+inputs:
+  actionlint-version:
+    description: Pinned actionlint version passed to download-actionlint.bash. Never "latest".
+    required: false
+    default: "1.7.12"
+
+outputs:
+  outcome:
+    description: '`success` or `failure` - the scan step''s own outcome.'
+    value: ${{ steps.scan.outcome }}
+  report:
+    description: Contents of actionlint-report.txt (or a placeholder if it wasn't written).
+    value: ${{ steps.report.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+
+    - id: scan
+      shell: bash
+      continue-on-error: true
+      run: |
+        set -o pipefail
+        bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) ${{ inputs.actionlint-version }}
+        ./actionlint -color 2>&1 | tee actionlint-report.txt
+
+    - name: Capture report
+      id: report
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        {
+          echo "report<<ACTIONLINT_REPORT_EOF"
+          if [ -f actionlint-report.txt ]; then
+            cat actionlint-report.txt
+            echo
+          else
+            echo "(no report written - see the actionlint job's own log)"
+          fi
+          echo "ACTIONLINT_REPORT_EOF"
+        } >> "$GITHUB_OUTPUT"

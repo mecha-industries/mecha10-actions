@@ -21,6 +21,8 @@ version bump lands once, not once per repo.
 | Path | Purpose |
 |------|---------|
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
+| `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
+| `.github/actions/ci-failure-ticket/` | Checks out the repo and runs its own ticket-filing script to file a Linear ticket for a failed CI job — replaces the checkout + "File CI failure ticket" step pair duplicated near byte-for-byte across every consuming repo's `security.yml`/`ci.yml`/`main.yml` `ci-failure-ticket` jobs. The caller's job keeps its own `needs:`/`if: always() && contains(needs.*.result, 'failure')` gating. |
 | `.github/actions/deps-changes/` | Runs `dorny/paths-filter` to detect dependency-manifest changes — replaces the `changes` job body duplicated across consuming repos' `security.yml` files. |
 
 ## Usage
@@ -47,8 +49,57 @@ Optional inputs for repos that need them:
 - `db-repository` / `java-db-repository` - override `TRIVY_DB_REPOSITORY` /
   `TRIVY_JAVA_DB_REPOSITORY` (e.g. to point at a `ghcr.io` mirror), same as mecha10-deploy's
   job does today. Leave unset to use Trivy's own defaults.
+- `cache-db: "true"` - caches the Trivy vulnerability DB in `.cache/trivy` with a date-keyed
+  `actions/cache` key (`trivy-db-YYYY-MM-DD`, falling back to any `trivy-db-` prefix match) and
+  passes `cache: false` / `cache-dir: .cache/trivy` to `trivy-action`, instead of letting
+  `trivy-action` manage its own cache. Pair with `cache-write: "true"` on exactly one trigger
+  (conventionally push-to-main) so that trigger writes a day's DB entry via `actions/cache`;
+  every other trigger (PRs, other branches) should leave `cache-write` unset/`"false"` so it only
+  reads via `actions/cache/restore`, avoiding multiple jobs racing to write the same multi-hundred-MB
+  entry.
 
-Both are purely additive and off by default, so existing callers are unaffected.
+All of the above are purely additive and off by default, so existing callers passing neither
+`cache-db` nor `cache-write` are unaffected.
+
+From a consuming repo's `required-checks` job:
+
+```yaml
+required-checks:
+  name: Security Scan required checks
+  needs: [changes, trivy-vuln, trivy-secret]
+  if: always()
+  runs-on: arc-catfood-minimal
+  timeout-minutes: 10
+  steps:
+    - uses: mecha-industries/mecha10-actions/.github/actions/fail-if-required-failed@main
+```
+
+A composite action can't contribute edges to another job's `needs:` graph — GitHub must be able
+to parse those edges ahead of time as literal job names — so the caller's `required-checks` job
+must still declare `if: always()` and list every real gate in its own `needs:`. This action only
+centralizes the body that checks their results.
+
+For the `ci-failure-ticket` job in a consuming repo's workflow, the caller keeps the job-level
+`needs:`/`if:` gating and delegates the step body:
+
+```yaml
+ci-failure-ticket:
+  name: ci-failure-ticket
+  needs: [trivy-vuln, trivy-secret]
+  if: always() && contains(needs.*.result, 'failure')
+  runs-on: arc-catfood-minimal
+  timeout-minutes: 10
+  permissions:
+    contents: read
+  steps:
+    - uses: mecha-industries/mecha10-actions/.github/actions/ci-failure-ticket@main
+      with:
+        workflow-name: "Security Scan"
+        linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+```
+
+Pass `script-path` only if the repo's ticket-filing script isn't at the default
+`scripts/ci/file-ci-failure-ticket.sh` (e.g. `scripts/file-ci-failure-ticket.sh`).
 
 ### deps-changes
 
