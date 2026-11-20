@@ -21,6 +21,25 @@ inputs:
     description: Pinned aquasecurity/trivy-action version.
     required: false
     default: "v0.36.0"
+  resilient-install:
+    description: >
+      If "true", download the Trivy binary directly from GitHub's releases/download CDN
+      with a retry loop instead of letting trivy-action's own setup-trivy installer run.
+      Works around setup-trivy's flaky version-lookup call under load.
+    required: false
+    default: "false"
+  trivy-version:
+    description: Trivy version to install when resilient-install is "true" (e.g. v0.76.2).
+    required: false
+    default: "v0.76.2"
+  db-repository:
+    description: Optional override for TRIVY_DB_REPOSITORY (e.g. ghcr.io/aquasecurity/trivy-db:2).
+    required: false
+    default: ""
+  java-db-repository:
+    description: Optional override for TRIVY_JAVA_DB_REPOSITORY.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -34,9 +53,44 @@ runs:
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends curl ca-certificates
         fi
 
+    - name: Install Trivy binary (resilient)
+      if: inputs.resilient-install == 'true'
+      shell: bash
+      env:
+        TRIVY_VERSION: ${{ inputs.trivy-version }}
+      run: |
+        set -e
+        BIN_DIR="$HOME/.local/bin/trivy-bin"
+        mkdir -p "$BIN_DIR"
+        VER_NUM="${TRIVY_VERSION#v}"
+        URL="https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${VER_NUM}_Linux-64bit.tar.gz"
+        for i in 1 2 3 4 5; do
+          if curl -fsSL "$URL" -o /tmp/trivy.tar.gz; then
+            tar -xzf /tmp/trivy.tar.gz -C "$BIN_DIR" trivy
+            echo "Installed Trivy ${TRIVY_VERSION} on attempt $i"
+            break
+          fi
+          echo "Trivy download attempt $i failed, retrying in $((i * 5))s..." >&2
+          [ "$i" -eq 5 ] && { echo "::error::Trivy install failed after 5 attempts" >&2; exit 1; }
+          sleep $((i * 5))
+        done
+        echo "$BIN_DIR" >> "$GITHUB_PATH"
+
+    - name: Set Trivy DB repository overrides
+      if: inputs.db-repository != '' || inputs.java-db-repository != ''
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.db-repository }}" ]; then
+          echo "TRIVY_DB_REPOSITORY=${{ inputs.db-repository }}" >> "$GITHUB_ENV"
+        fi
+        if [ -n "${{ inputs.java-db-repository }}" ]; then
+          echo "TRIVY_JAVA_DB_REPOSITORY=${{ inputs.java-db-repository }}" >> "$GITHUB_ENV"
+        fi
+
     - name: Run Trivy
       uses: aquasecurity/trivy-action@v0.36.0
       with:
+        skip-setup-trivy: ${{ inputs.resilient-install }}
         scan-type: fs
         scan-ref: ${{ inputs.scan-ref }}
         scanners: ${{ inputs.scanners }}

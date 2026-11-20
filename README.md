@@ -38,6 +38,17 @@ steps:
 Pin to a tag once this repo cuts a first release; `@main` is fine for the initial rollout while
 this is still new.
 
+Optional inputs for repos that need them:
+- `resilient-install: "true"` - downloads the Trivy binary directly from GitHub's
+  releases/download CDN with a retry loop instead of letting `trivy-action`'s own
+  `setup-trivy` installer run (its version-lookup call is flaky under load). Pair with
+  `trivy-version` (default `v0.76.2`) to pin the downloaded release.
+- `db-repository` / `java-db-repository` - override `TRIVY_DB_REPOSITORY` /
+  `TRIVY_JAVA_DB_REPOSITORY` (e.g. to point at a `ghcr.io` mirror), same as mecha10-deploy's
+  job does today. Leave unset to use Trivy's own defaults.
+
+Both are purely additive and off by default, so existing callers are unaffected.
+
 ## Adding more shared actions
 
 Each new shared piece gets its own directory under `.github/actions/<name>/` with an
