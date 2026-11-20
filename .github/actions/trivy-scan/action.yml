@@ -57,6 +57,15 @@ inputs:
       multi-hundred-MB entry. Default "false" (read-only).
     required: false
     default: "false"
+  direct-binary:
+    description: >
+      When "true", run the downloaded Trivy binary directly from a shell step instead of
+      delegating to aquasecurity/trivy-action. trivy-action is a Docker-container action, so it
+      requires a Docker CLI on the runner host; the direct path does not, which lets a caller run
+      this action on a minimal runner image with no `container:` block. Implies the same binary
+      download that resilient-install performs.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -64,14 +73,26 @@ runs:
     - name: Install curl (needed by trivy-action's own installer)
       shell: bash
       run: |
+        set -o pipefail
+        PACKAGES=""
+        command -v curl >/dev/null 2>&1 || PACKAGES="$PACKAGES curl ca-certificates"
+        if [ "${{ inputs.resilient-install }}" == "true" ] || [ "${{ inputs.direct-binary }}" == "true" ]; then
+          command -v tar >/dev/null 2>&1 || PACKAGES="$PACKAGES tar"
+        fi
+        if [ -z "$PACKAGES" ]; then
+          exit 0
+        fi
         if [ "$(id -u)" -eq 0 ]; then
-          apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends $PACKAGES
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends $PACKAGES
         else
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends curl ca-certificates
+          echo "::error::Missing required packages ($PACKAGES) and no sudo available to install them" >&2
+          exit 1
         fi
 
     - name: Install Trivy binary (resilient)
-      if: inputs.resilient-install == 'true'
+      if: inputs.resilient-install == 'true' || inputs.direct-binary == 'true'
       shell: bash
       env:
         TRIVY_VERSION: ${{ inputs.trivy-version }}
@@ -129,7 +150,7 @@ runs:
           trivy-db-
 
     - name: Run Trivy
-      if: inputs.cache-db != 'true'
+      if: inputs.cache-db != 'true' && inputs.direct-binary != 'true'
       uses: aquasecurity/trivy-action@v0.36.0
       with:
         skip-setup-trivy: ${{ inputs.resilient-install }}
@@ -141,7 +162,7 @@ runs:
         format: table
 
     - name: Run Trivy (with DB cache)
-      if: inputs.cache-db == 'true'
+      if: inputs.cache-db == 'true' && inputs.direct-binary != 'true'
       uses: aquasecurity/trivy-action@v0.36.0
       with:
         skip-setup-trivy: ${{ inputs.resilient-install }}
@@ -153,3 +174,15 @@ runs:
         format: table
         cache: false
         cache-dir: .cache/trivy
+
+    - name: Run Trivy (direct binary)
+      if: inputs.direct-binary == 'true'
+      shell: bash
+      run: |
+        set -o pipefail
+        args=(fs --scanners "${{ inputs.scanners }}" --severity "${{ inputs.severity }}" --exit-code 1 --format table)
+        if [ "${{ inputs.cache-db }}" == "true" ]; then
+          mkdir -p .cache/trivy
+          args+=(--cache-dir .cache/trivy)
+        fi
+        trivy "${args[@]}" "${{ inputs.scan-ref }}"
