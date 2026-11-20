@@ -1,0 +1,78 @@
+name: File Linear tickets for failing checks
+description: >
+  Files a deduped Linear ticket (via a per-repo script, already per-PR-per-job
+  deduped, see that script's own header) for every failed entry in the
+  entries file, from a single job/runner instead of one ticket-filing step
+  copy-pasted into each scan job. Hoisted from three independently
+  maintained per-repo copies (mecha-industries/mecha10,
+  mecha-industries/mecha10-api, mecha-industries/mecha10-dashboard). Mirrors
+  PeterChauYEG/labone-actions' identical `file-linear-tickets` composite
+  action, kept local (no `PeterChauYEG/labone-actions` reference) per org
+  policy.
+
+inputs:
+  entries-file:
+    description: >
+      Path to a file holding a JSON array of {name, outcome, report,
+      groups} objects, one per upstream job. `outcome` is that job's
+      `outputs.outcome` (only "failure" entries file a ticket). `groups` is
+      optional (omit, or pass "[]", for jobs that don't produce a groups
+      file - the underlying script falls back to a single flat ticket). A
+      file path, not the JSON content itself, because a composite action's
+      inputs become plain environment variables under the hood - packing
+      every upstream job's full report text into one env var can exceed
+      Linux's per-string exec limit (MAX_ARG_STRLEN, 128KB) and fail the
+      whole step with an opaque "Argument list too long" (observed on
+      mecha10 PR #864). Write the JSON to disk with a `run:` step (no such
+      limit there) and pass its path instead, e.g.
+      `${{ runner.temp }}/file-linear-tickets-entries.json`.
+    required: true
+  linear-api-key:
+    description: Linear GraphQL API key (repo secret), forwarded to the filing script as LINEAR_API_KEY.
+    required: true
+  pr-number:
+    description: Pull request number, forwarded to the filing script as PR_NUMBER.
+    required: true
+  pr-url:
+    description: Pull request HTML URL, forwarded to the filing script as PR_URL.
+    required: true
+  run-url:
+    description: Workflow run URL, forwarded to the filing script as RUN_URL.
+    required: true
+  script-path:
+    description: >
+      Path, relative to the caller's checked-out repo, to that repo's own
+      ticket-filing script (e.g. scripts/ci/file-linear-ticket.sh,
+      services/api/scripts/file-linear-ticket.sh, or
+      scripts/file-linear-ticket.sh). The three repos' scripts diverged in
+      team/label IDs and dedup details, so rather than bundle one copy into
+      this shared action and silently drop the others' behavior, each
+      caller keeps its own script in its own repo and passes its path
+      here. No default, since the three existing callers each use a
+      different path.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: File Linear tickets
+      shell: bash
+      env:
+        ENTRIES_FILE: ${{ inputs.entries-file }}
+        LINEAR_API_KEY: ${{ inputs.linear-api-key }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        PR_URL: ${{ inputs.pr-url }}
+        RUN_URL: ${{ inputs.run-url }}
+        SCRIPT_PATH: ${{ inputs.script-path }}
+      run: |
+        set -uo pipefail
+
+        jq -c '.[] | select(.outcome == "failure")' "$ENTRIES_FILE" | while IFS= read -r entry; do
+          name=$(jq -r '.name' <<<"$entry")
+          report=$(jq -r '.report' <<<"$entry")
+          groups=$(jq -r '.groups // "[]"' <<<"$entry")
+          printf '%s\n' "$report" > /tmp/report.md
+          printf '%s\n' "$groups" > /tmp/groups.json
+          bash "$SCRIPT_PATH" "$name" /tmp/report.md /tmp/groups.json
+        done
