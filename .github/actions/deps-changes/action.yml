@@ -6,11 +6,16 @@ description: >
   Cargo.lock, requirements*.txt/pyproject.toml, Gemfile/Gemfile.lock, go.mod/go.sum) from
   mecha10-rl's job; it is a strict superset of mecha10-nodes' Rust-only list, so Rust-only repos
   get identical behavior from the default (no non-Rust manifests exist there to match) and don't
-  need to pass anything. Pass `filters` to narrow or otherwise customize the list. Job-level
-  concerns can't live in a composite action: the caller's `changes` job must still declare its own
+  need to pass anything. Pass `filters` to narrow or otherwise customize the list. For monorepos
+  (e.g. a Rust workspace with many crates), pass a `filters` block with one key per package, such
+  as `crate-a: ['crates/crate-a/**/Cargo.toml']` and `crate-b: ['crates/crate-b/**/Cargo.toml']`,
+  then gate a matrix or a per-package job on the new `changes` output, e.g.
+  `if: contains(fromJSON(needs.changes.outputs.changes), 'crate-a')`. Job-level concerns can't
+  live in a composite action: the caller's `changes` job must still declare its own
   `if: github.event_name != 'schedule'`, `runs-on:`, `permissions: { contents: read,
   pull-requests: read }` (pull-requests: read is required by paths-filter on pull_request events),
-  and an `outputs: { deps: ... }` mapping that re-exports this action's `deps` output.
+  and an `outputs:` mapping that re-exports this action's `deps` output and, for monorepo callers,
+  its `changes` output.
 
 inputs:
   filters:
@@ -36,6 +41,15 @@ outputs:
   deps:
     description: Whether any dependency manifest matched the filters.
     value: ${{ steps.filter.outputs.deps }}
+  changes:
+    description: >
+      JSON array of the `filters` keys that matched (dorny/paths-filter's `changes` output,
+      passed through unchanged). For a monorepo `filters` block with one key per package/crate
+      (e.g. `crate-a`, `crate-b`), a caller indexes this per package instead of relying on the
+      single repo-wide `deps` boolean, e.g.
+      `if: contains(fromJSON(needs.changes.outputs.changes), 'crate-a')` to gate a per-package job,
+      or iterate it as a matrix via `fromJSON(needs.changes.outputs.changes)`.
+    value: ${{ steps.filter.outputs.changes }}
 
 runs:
   using: composite
