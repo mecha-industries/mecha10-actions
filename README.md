@@ -21,6 +21,7 @@ version bump lands once, not once per repo.
 | Path | Purpose |
 |------|---------|
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
+| `.github/actions/deps-changes/` | Runs `dorny/paths-filter` to detect dependency-manifest changes — replaces the `changes` job body duplicated across consuming repos' `security.yml` files. |
 
 ## Usage
 
@@ -48,6 +49,37 @@ Optional inputs for repos that need them:
   job does today. Leave unset to use Trivy's own defaults.
 
 Both are purely additive and off by default, so existing callers are unaffected.
+
+### deps-changes
+
+Replaces the `changes` job body duplicated across consuming repos' `security.yml` files
+(dependency-manifest change detection via `dorny/paths-filter`). Job-level concerns — `if:`,
+`runs-on:`, `permissions:`, and `outputs:` — can't live in a composite action, so the caller's
+job still declares them itself and re-exports the action's `deps` output:
+
+```yaml
+jobs:
+  changes:
+    name: changes
+    if: github.event_name != 'schedule'
+    runs-on: arc-catfood-minimal
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deps: ${{ steps.filter.outputs.deps }}
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/deps-changes@main
+        id: filter
+```
+
+The default `filters` input is the broad polyglot dependency-manifest list (`package.json`,
+`yarn.lock`, `pnpm-lock.yaml`, `Cargo.toml`, `Cargo.lock`, `requirements*.txt`, `pyproject.toml`,
+`Gemfile`, `Gemfile.lock`, `go.mod`, `go.sum`) — a superset of any single-ecosystem repo's
+narrower list, so Rust-only repos (e.g. mecha10-nodes) get identical behavior from the default
+without passing anything. Pass `filters` with a full `paths-filter` `filters:` block to override
+it for repos that want something narrower or different.
 
 ## Adding more shared actions
 
