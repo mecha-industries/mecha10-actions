@@ -1,0 +1,190 @@
+name: Security Scan (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      scan-ref:
+        description: Path to scan, forwarded to trivy-scan's scan-ref input.
+        type: string
+        default: '.'
+      severity:
+        description: Comma-separated severity levels to fail on, forwarded to trivy-scan.
+        type: string
+        default: 'HIGH,CRITICAL'
+      enable-vuln:
+        description: Whether to run the trivy-vuln job at all. Set false for repos with no dependency manifests (e.g. shell-script-only repos).
+        type: boolean
+        default: true
+      enable-secret:
+        description: Whether to run the trivy-secret job.
+        type: boolean
+        default: true
+      deps-filters:
+        description: >
+          Override for deps-changes' `filters` input. Leave empty to use that action's own
+          broad polyglot default, which is already a superset of any single-ecosystem repo's
+          narrower list.
+        type: string
+        default: ''
+      require-deps-change:
+        description: >
+          Whether trivy-vuln is gated on the `changes` job's dependency-manifest detection at
+          all. Set false for a caller that wants trivy-vuln to run unconditionally on every
+          trigger regardless of what changed (no `changes` job runs in that case either).
+        type: boolean
+        default: true
+      vuln-always-on-push:
+        description: >
+          When require-deps-change is true, whether a `push` event also bypasses the
+          deps-change gate (in addition to `schedule`, which always bypasses it). Leave false
+          to only bypass on `schedule` (gates both push and pull_request on deps); set true to
+          also bypass on push (gates only pull_request on deps).
+        type: boolean
+        default: false
+      cache-db:
+        description: Whether trivy-vuln's Trivy DB should be cached via trivy-scan's cache-db input.
+        type: boolean
+        default: false
+      cache-write:
+        description: Whether this run may write a new Trivy DB cache entry (true) or only read one (false). Only used when cache-db is true.
+        type: boolean
+        default: false
+      resilient-install:
+        description: Forwarded to trivy-scan's resilient-install input, for both trivy-vuln and trivy-secret.
+        type: boolean
+        default: false
+      trivy-version:
+        description: Forwarded to trivy-scan's trivy-version input. Only used when resilient-install is true.
+        type: string
+        default: 'v0.76.2'
+      db-repository:
+        description: Forwarded to trivy-scan's db-repository input (Trivy DB mirror override).
+        type: string
+        default: ''
+      java-db-repository:
+        description: Forwarded to trivy-scan's java-db-repository input (Trivy Java DB mirror override).
+        type: string
+        default: ''
+      enable-ci-failure-ticket:
+        description: Whether to run the ci-failure-ticket job on a trivy-vuln/trivy-secret failure.
+        type: boolean
+        default: true
+      ci-failure-ticket-script-path:
+        description: Path, in the caller's checked-out repo, to its own ticket-filing script.
+        type: string
+        default: 'scripts/ci/file-ci-failure-ticket.sh'
+      workflow-name:
+        description: Human-readable label passed to ci-failure-ticket, e.g. "Security Scan".
+        type: string
+        default: 'Security Scan'
+      enable-required-checks:
+        description: Whether to run the required-checks aggregate gate job (changes, trivy-vuln, trivy-secret).
+        type: boolean
+        default: true
+      runner-label:
+        description: Runner label for the trivy-vuln/trivy-secret jobs (needs Docker CLI to run a container job).
+        type: string
+        default: 'arc-catfood-docker'
+      minimal-runner-label:
+        description: Runner label for the changes/required-checks/ci-failure-ticket jobs (no toolchain needed).
+        type: string
+        default: 'arc-catfood-minimal'
+      container-image:
+        description: Container image for the trivy-vuln/trivy-secret jobs. trivy-scan installs curl itself inside it.
+        type: string
+        default: 'ubuntu:22.04'
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: changes
+    if: github.event_name != 'schedule' && inputs.enable-vuln && inputs.require-deps-change
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deps: ${{ steps.filter.outputs.deps || steps.filter-custom.outputs.deps }}
+    steps:
+      - id: filter
+        if: inputs.deps-filters == ''
+        uses: mecha-industries/mecha10-actions/.github/actions/deps-changes@main
+
+      - id: filter-custom
+        if: inputs.deps-filters != ''
+        uses: mecha-industries/mecha10-actions/.github/actions/deps-changes@main
+        with:
+          filters: ${{ inputs.deps-filters }}
+
+  trivy-vuln:
+    name: Trivy vulnerability scan
+    needs: changes
+    if: >-
+      always() && inputs.enable-vuln &&
+      (inputs.require-deps-change == false ||
+       github.event_name == 'schedule' ||
+       (inputs.vuln-always-on-push && github.event_name == 'push') ||
+       needs.changes.outputs.deps == 'true')
+    runs-on: ${{ inputs.runner-label }}
+    container:
+      image: ${{ inputs.container-image }}
+      options: --cpus=1 --memory=1Gi
+    timeout-minutes: 20
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/trivy-scan@main
+        with:
+          scanners: vuln
+          severity: ${{ inputs.severity }}
+          scan-ref: ${{ inputs.scan-ref }}
+          resilient-install: ${{ inputs.resilient-install }}
+          trivy-version: ${{ inputs.trivy-version }}
+          db-repository: ${{ inputs.db-repository }}
+          java-db-repository: ${{ inputs.java-db-repository }}
+          cache-db: ${{ inputs.cache-db }}
+          cache-write: ${{ inputs.cache-write }}
+
+  trivy-secret:
+    name: Trivy secret scan
+    # Deliberately not gated by `changes` (unlike trivy-vuln): a secret can be introduced by
+    # any file change, not just a dependency-manifest change.
+    if: always() && inputs.enable-secret
+    runs-on: ${{ inputs.runner-label }}
+    container:
+      image: ${{ inputs.container-image }}
+      options: --cpus=1 --memory=1Gi
+    timeout-minutes: 20
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/trivy-scan@main
+        with:
+          scanners: secret
+          severity: ${{ inputs.severity }}
+          scan-ref: ${{ inputs.scan-ref }}
+          resilient-install: ${{ inputs.resilient-install }}
+          trivy-version: ${{ inputs.trivy-version }}
+
+  required-checks:
+    name: Security Scan required checks
+    needs: [changes, trivy-vuln, trivy-secret]
+    if: always() && inputs.enable-required-checks
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/fail-if-required-failed@main
+
+  ci-failure-ticket:
+    name: ci-failure-ticket
+    needs: [trivy-vuln, trivy-secret]
+    if: always() && inputs.enable-ci-failure-ticket && contains(needs.*.result, 'failure')
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/ci-failure-ticket@main
+        with:
+          workflow-name: ${{ inputs.workflow-name }}
+          script-path: ${{ inputs.ci-failure-ticket-script-path }}
+          linear-api-key: ${{ secrets.LINEAR_API_KEY }}

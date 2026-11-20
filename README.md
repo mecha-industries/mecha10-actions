@@ -276,6 +276,68 @@ action cannot contribute to another job's `needs:` graph or declare job-level
 including an `if:` that skips runs whose own commit message matches `commit-message` above (so
 this job's writeback commit doesn't retrigger itself).
 
+## Reusable workflows
+
+Unlike the composite actions above (one `with:` call per step), a reusable workflow is invoked
+once via `uses:` at the *job* level and owns its own job graph. This repo has one so far:
+
+### security-scan.yml
+
+The shared engine behind every mecha-industries repo's `security.yml`: a `changes` gate (skip the
+vulnerability scan on PRs/pushes that touch no dependency manifest), `trivy-vuln` and
+`trivy-secret` scan jobs built on this repo's own `trivy-scan` action, an optional
+`required-checks` aggregate gate, and an optional `ci-failure-ticket` job. Every point where the
+seven current `security.yml` callers diverge (gating formula, Trivy DB mirror, caching, script
+path, whether `required-checks`/`changes` even exist) is a `workflow_call` input - see the input
+descriptions in `security-scan.yml` itself for the full list and defaults.
+
+Add this to a consuming repo's `.github/workflows/security.yml` (adjust the `on:` triggers and
+`with:` inputs for that repo's current behavior):
+
+```yaml
+name: Security Scan
+run-name: Dependency & secret scan
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 6 * * 1'
+
+# The nested `changes` job in security-scan.yml requests `pull-requests: read` (required by
+# dorny/paths-filter on pull_request events) - a reusable workflow's job can never be granted
+# more permission than the CALLER itself grants, so this caller must declare
+# `pull-requests: read` here too, not just `contents: read`. Skipping this causes a
+# `startup_failure` whose cause only shows up in the GitHub web UI's validation error - it
+# never surfaces via the REST/GraphQL APIs, so it's easy to misdiagnose as something else.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-scan:
+    uses: mecha-industries/mecha10-actions/.github/workflows/security-scan.yml@main
+    # Required so the called workflow's ci-failure-ticket job can read secrets.LINEAR_API_KEY.
+    secrets: inherit
+    with:
+      # Only the push-to-main run writes a fresh Trivy DB cache entry - PR and scheduled runs
+      # only read it, so they don't race to create their own multi-hundred-MB copy.
+      cache-write: ${{ github.event_name == 'push' }}
+```
+
+Leave every other `with:` input unset to get `security-scan.yml`'s defaults (vuln + secret scans
+both enabled, `HIGH,CRITICAL` severity, deps-gated vuln scan bypassed only on `schedule`,
+`required-checks` and `ci-failure-ticket` both enabled, default script path, no DB caching). Pass
+only the inputs a given repo actually needs to diverge from that baseline - see `security-scan.yml`
+for the complete input list.
+
 ## Adding more shared actions
 
 Each new shared piece gets its own directory under `.github/actions/<name>/` with an
