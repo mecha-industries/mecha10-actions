@@ -40,6 +40,23 @@ inputs:
     description: Optional override for TRIVY_JAVA_DB_REPOSITORY.
     required: false
     default: ""
+  cache-db:
+    description: >
+      When "true", wraps the Trivy step with a date-keyed actions/cache (write) or
+      actions/cache/restore (read-only) step against .cache/trivy, and passes
+      `cache: false` + `cache-dir: .cache/trivy` to trivy-action so this composite action
+      manages the DB cache itself instead of trivy-action's own default caching.
+      Default "false" - today's behavior, unaffected for every existing caller.
+    required: false
+    default: "false"
+  cache-write:
+    description: >
+      Only used when cache-db is "true". Whether this run may write a new cache entry ("true")
+      or only read an existing one via restore-keys ("false") - only one trigger (conventionally
+      push-to-main) should write a given day's DB so others don't race to create their own
+      multi-hundred-MB entry. Default "false" (read-only).
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -87,7 +104,32 @@ runs:
           echo "TRIVY_JAVA_DB_REPOSITORY=${{ inputs.java-db-repository }}" >> "$GITHUB_ENV"
         fi
 
+    - name: Compute Trivy DB cache date
+      if: inputs.cache-db == 'true'
+      id: trivy-date
+      shell: bash
+      run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Trivy DB
+      if: inputs.cache-db == 'true' && inputs.cache-write == 'true'
+      uses: actions/cache@v4
+      with:
+        path: .cache/trivy
+        key: trivy-db-${{ steps.trivy-date.outputs.date }}
+        restore-keys: |
+          trivy-db-
+
+    - name: Restore Trivy DB (read-only)
+      if: inputs.cache-db == 'true' && inputs.cache-write != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: .cache/trivy
+        key: trivy-db-${{ steps.trivy-date.outputs.date }}
+        restore-keys: |
+          trivy-db-
+
     - name: Run Trivy
+      if: inputs.cache-db != 'true'
       uses: aquasecurity/trivy-action@v0.36.0
       with:
         skip-setup-trivy: ${{ inputs.resilient-install }}
@@ -97,3 +139,17 @@ runs:
         severity: ${{ inputs.severity }}
         exit-code: "1"
         format: table
+
+    - name: Run Trivy (with DB cache)
+      if: inputs.cache-db == 'true'
+      uses: aquasecurity/trivy-action@v0.36.0
+      with:
+        skip-setup-trivy: ${{ inputs.resilient-install }}
+        scan-type: fs
+        scan-ref: ${{ inputs.scan-ref }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        exit-code: "1"
+        format: table
+        cache: false
+        cache-dir: .cache/trivy
