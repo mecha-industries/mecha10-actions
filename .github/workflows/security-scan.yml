@@ -175,7 +175,10 @@ jobs:
     runs-on: ${{ inputs.minimal-runner-label }}
     timeout-minutes: 10
     steps:
-      - uses: mecha-industries/mecha10-actions/.github/actions/fail-if-required-failed@main
+      - name: Fail if any required job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        shell: bash
+        run: exit 1
 
   ci-failure-ticket:
     name: ci-failure-ticket

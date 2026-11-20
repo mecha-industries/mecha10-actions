@@ -24,7 +24,6 @@ version bump lands once, not once per repo.
 | `.github/actions/ci-failure-ticket/` | Checks out the repo and runs its own ticket-filing script to file a Linear ticket for a failed CI job — replaces the checkout + "File CI failure ticket" step pair duplicated near byte-for-byte across every consuming repo's `security.yml`/`ci.yml`/`main.yml` `ci-failure-ticket` jobs. The caller's job keeps its own `needs:`/`if: always() && contains(needs.*.result, 'failure')` gating. |
 | `.github/actions/commit-and-push-writeback/` | Stages, commits, and pushes generated files directly to the default branch, with fetch/rebase/push retry over concurrent pushes — replaces the writeback mechanics duplicated across mecha10-api/mecha10-dashboard/mecha10-rl's `update-status-table` jobs. |
 | `.github/actions/deps-changes/` | Runs `dorny/paths-filter` to detect dependency-manifest changes — replaces the `changes` job body duplicated across consuming repos' `security.yml` files. |
-| `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
 | `.github/actions/file-linear-tickets/` | Files a deduped Linear ticket for every failed entry in a JSON report file, from a single job instead of one ticket-filing step per scan job — hoisted from mecha10/mecha10-api/mecha10-dashboard. |
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
 
@@ -70,26 +69,6 @@ Inputs:
 
 All of the cache-related inputs are purely additive and off by default, so existing callers
 passing neither `cache-db` nor `cache-write` are unaffected.
-
-### fail-if-required-failed
-
-From a consuming repo's `required-checks` job:
-
-```yaml
-required-checks:
-  name: Security Scan required checks
-  needs: [changes, trivy-vuln, trivy-secret]
-  if: always()
-  runs-on: arc-catfood-minimal
-  timeout-minutes: 10
-  steps:
-    - uses: mecha-industries/mecha10-actions/.github/actions/fail-if-required-failed@main
-```
-
-No inputs. A composite action can't contribute edges to another job's `needs:` graph — GitHub
-must be able to parse those edges ahead of time as literal job names — so the caller's
-`required-checks` job must still declare `if: always()` and list every real gate in its own
-`needs:`. This action only centralizes the body that checks their results.
 
 ### ci-failure-ticket
 
@@ -347,6 +326,46 @@ both enabled, `HIGH,CRITICAL` severity, deps-gated vuln scan bypassed only on `s
 `required-checks` and `ci-failure-ticket` both enabled, default script path, no DB caching). Pass
 only the inputs a given repo actually needs to diverge from that baseline - see `security-scan.yml`
 for the complete input list.
+
+### ⚠️ Required-check naming: branch protection on a reusable-workflow job
+
+A job inside a called reusable workflow is reported to GitHub as
+`<caller-job-id> / <job-name>` — e.g. the engine's `Security Scan required checks` job surfaces as
+`security-scan / Security Scan required checks`. A repo whose branch protection requires the bare
+name `Security Scan required checks` will therefore never see that context satisfied, and its PRs
+stay `BLOCKED` forever.
+
+Confirmed: mecha-industries/mecha10, mecha10-api and mecha10-rl all require the bare
+`Security Scan required checks` context today.
+
+The fix requires no branch-protection change. A top-level job in the calling workflow gets no
+prefix, and a reusable-workflow caller job already succeeds or fails as the aggregate of every job
+inside it. So the consumer declares its own aggregator with the exact name branch protection
+expects:
+
+```yaml
+jobs:
+  security-scan:
+    uses: mecha-industries/mecha10-actions/.github/workflows/security-scan.yml@main
+    secrets: inherit
+    with:
+      enable-required-checks: false   # the consumer aggregator below is the gate
+  required-checks:
+    name: Security Scan required checks     # exactly the branch-protection context name
+    needs: [security-scan]
+    if: always()
+    runs-on: arc-catfood-minimal
+    timeout-minutes: 10
+    steps:
+      - name: Fail if the security scan failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        shell: bash
+        run: exit 1
+```
+
+A repo whose branch protection does not gate on Security Scan (mecha10-dashboard, mecha10-deploy,
+mecha10-nodes, user-tools) needs no aggregator job and can simply leave
+`enable-required-checks: false`.
 
 ## Adding more shared actions
 
