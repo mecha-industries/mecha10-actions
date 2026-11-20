@@ -1,0 +1,36 @@
+name: CI failure ticket
+description: >
+  Files a Linear ticket for a failed CI job. Replaces the checkout + "File CI failure ticket"
+  step pair duplicated near byte-for-byte across mecha-industries repos' security.yml/ci.yml/
+  main.yml ci-failure-ticket jobs. The caller's job still owns the `needs: [...]` and
+  `if: always() && contains(needs.*.result, 'failure')` gating and the `ci-failure-ticket`
+  job name itself - those are job-level edges that cannot move into a composite action. This
+  action only centralizes the step body: checking out the repo and invoking the repo's own
+  ticket-filing script.
+
+inputs:
+  workflow-name:
+    description: Human-readable label for the failed workflow, passed as the script's first argument (e.g. "Security Scan", "CI").
+    required: true
+  script-path:
+    description: Path to the repo's own ticket-filing script.
+    required: false
+    default: "scripts/ci/file-ci-failure-ticket.sh"
+  linear-api-key:
+    description: Linear API key, e.g. ${{ secrets.LINEAR_API_KEY }} from the caller.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+
+    - name: File CI failure ticket
+      shell: bash
+      env:
+        LINEAR_API_KEY: ${{ inputs.linear-api-key }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        bash ${{ inputs.script-path }} \
+          "${{ inputs.workflow-name }}" \
+          "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

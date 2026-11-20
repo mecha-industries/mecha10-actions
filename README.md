@@ -22,6 +22,7 @@ version bump lands once, not once per repo.
 |------|---------|
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
 | `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
+| `.github/actions/ci-failure-ticket/` | Checks out the repo and runs its own ticket-filing script to file a Linear ticket for a failed CI job — replaces the checkout + "File CI failure ticket" step pair duplicated near byte-for-byte across every consuming repo's `security.yml`/`ci.yml`/`main.yml` `ci-failure-ticket` jobs. The caller's job keeps its own `needs:`/`if: always() && contains(needs.*.result, 'failure')` gating. |
 
 ## Usage
 
@@ -76,6 +77,28 @@ A composite action can't contribute edges to another job's `needs:` graph — Gi
 to parse those edges ahead of time as literal job names — so the caller's `required-checks` job
 must still declare `if: always()` and list every real gate in its own `needs:`. This action only
 centralizes the body that checks their results.
+
+For the `ci-failure-ticket` job in a consuming repo's workflow, the caller keeps the job-level
+`needs:`/`if:` gating and delegates the step body:
+
+```yaml
+ci-failure-ticket:
+  name: ci-failure-ticket
+  needs: [trivy-vuln, trivy-secret]
+  if: always() && contains(needs.*.result, 'failure')
+  runs-on: arc-catfood-minimal
+  timeout-minutes: 10
+  permissions:
+    contents: read
+  steps:
+    - uses: mecha-industries/mecha10-actions/.github/actions/ci-failure-ticket@main
+      with:
+        workflow-name: "Security Scan"
+        linear-api-key: ${{ secrets.LINEAR_API_KEY }}
+```
+
+Pass `script-path` only if the repo's ticket-filing script isn't at the default
+`scripts/ci/file-ci-failure-ticket.sh` (e.g. `scripts/file-ci-failure-ticket.sh`).
 
 ## Adding more shared actions
 
