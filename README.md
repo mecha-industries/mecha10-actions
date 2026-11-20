@@ -21,6 +21,7 @@ version bump lands once, not once per repo.
 | Path | Purpose |
 |------|---------|
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
+| `.github/actions/fail-if-required-failed/` | Fails the job if any job in `needs:` failed or was cancelled — replaces the `exit 1`-on-`contains(needs.*.result, ...)` step duplicated verbatim across every consuming repo's `required-checks` job. |
 
 ## Usage
 
@@ -48,6 +49,24 @@ Optional inputs for repos that need them:
   job does today. Leave unset to use Trivy's own defaults.
 
 Both are purely additive and off by default, so existing callers are unaffected.
+
+From a consuming repo's `required-checks` job:
+
+```yaml
+required-checks:
+  name: Security Scan required checks
+  needs: [changes, trivy-vuln, trivy-secret]
+  if: always()
+  runs-on: arc-catfood-minimal
+  timeout-minutes: 10
+  steps:
+    - uses: mecha-industries/mecha10-actions/.github/actions/fail-if-required-failed@main
+```
+
+A composite action can't contribute edges to another job's `needs:` graph — GitHub must be able
+to parse those edges ahead of time as literal job names — so the caller's `required-checks` job
+must still declare `if: always()` and list every real gate in its own `needs:`. This action only
+centralizes the body that checks their results.
 
 ## Adding more shared actions
 
