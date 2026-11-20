@@ -4,6 +4,9 @@ description: >
   Replaces the apt-get install curl/ca-certificates + aquasecurity/trivy-action steps
   duplicated verbatim across mecha-industries repos' security.yml/pr.yml files. Intended
   to run inside a job with `container: image: ubuntu:22.04` (or any image lacking curl).
+  Unlike this repo's other composite actions, this action deliberately does NOT check out
+  the repository itself — the calling job is responsible for running actions/checkout
+  before this step.
 
 inputs:
   scanners:
