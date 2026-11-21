@@ -1,0 +1,137 @@
+name: Restore deps + run a cached yarn script
+description: >
+  Restores deps by calling the sibling `setup-node-yarn` action, optionally
+  wraps a script-specific incremental cache
+  (.eslintcache/tsconfig.tsbuildinfo/.jestcache/etc.) around it in either
+  read-only or read+write mode, then runs `yarn <script> <script-args>`.
+  This is the shape every lint/typecheck/build/test job in a repo's CI
+  shares, with only the cache read-vs-write behavior differing between PR
+  and push-to-main runs (mirroring setup-node-yarn's own `cache-write`
+  input). This action does not check out the repository itself — the
+  sibling setup-node-yarn action it calls does that.
+
+inputs:
+  deps-cache-key-prefix:
+    description: >
+      Job/purpose identifier (e.g. 'lint', 'typecheck', 'test', 'build')
+      passed straight through to setup-node-yarn's cache-key-prefix input,
+      scoping the node_modules/yarn cache this job restores to this job
+      alone. Required, distinct from cache-key-prefix below (which scopes
+      only this action's own script-specific cache, e.g. .eslintcache).
+    required: true
+  working-directory:
+    required: false
+    default: '.'
+  extra-paths:
+    description: Passed straight through to setup-node-yarn's extra-paths input.
+    required: false
+    default: ''
+  extra-deps-cache-key-glob-1:
+    description: >
+      Passed straight through to setup-node-yarn's extra-cache-key-glob-1
+      input - an extra glob (e.g. prisma/schema.prisma) folded into the
+      node_modules cache key so a `postinstall` codegen input changing
+      invalidates the cache even when yarn.lock didn't change. Distinct
+      from cache-key-extra-glob-1 below, which only affects this action's
+      own script-specific cache (.eslintcache/tsbuildinfo/.jestcache), not
+      the node_modules restore.
+    required: false
+    default: ''
+  extra-deps-cache-key-glob-2:
+    description: Second glob - see extra-deps-cache-key-glob-1.
+    required: false
+    default: ''
+  ssh-deploy-key:
+    description: Passed straight through to setup-node-yarn's ssh-deploy-key input.
+    required: false
+    default: ''
+  gh-token:
+    description: Passed straight through to setup-node-yarn's gh-token input.
+    required: false
+    default: ''
+  script:
+    description: package.json script name to run (e.g. lint, typecheck, build, test:coverage).
+    required: true
+  script-args:
+    description: >
+      Extra CLI args forwarded to the script (yarn forwards extra args to
+      the underlying command) - e.g. `--cache --cache-location
+      .eslintcache`. Empty (default) for scripts with nothing to forward
+      (e.g. build).
+    required: false
+    default: ''
+  cache-path:
+    description: >
+      Path (relative to working-directory) to cache across runs, e.g.
+      .eslintcache / tsconfig.tsbuildinfo / .jestcache. Empty (default)
+      skips caching entirely - e.g. build has no incremental cache to
+      restore.
+    required: false
+    default: ''
+  cache-key-prefix:
+    description: >
+      Short name distinguishing this cache from others (e.g. eslintcache,
+      tsbuildinfo, jestcache). Required whenever cache-path is set.
+    required: false
+    default: ''
+  cache-key-extra-glob-1:
+    description: >
+      Extra glob pattern (relative to working-directory) folded into the
+      cache key's hashFiles alongside yarn.lock - e.g. eslint config files
+      for the lint cache, tsconfig*.json for typecheck, jest.config.* for
+      test. A caller needing two extra patterns also has
+      cache-key-extra-glob-2.
+    required: false
+    default: ''
+  cache-key-extra-glob-2:
+    required: false
+    default: ''
+  cache-write:
+    description: >
+      'true' to read+write the cache (push-to-main workflow), 'false'
+      (default) to only read it (PR workflow) - mirrors setup-node-yarn's
+      identical input and the same rationale: only the push-to-main run
+      needs to write a fresh entry, PR branches just read whatever main
+      last wrote.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - uses: mecha-industries/mecha10-actions/.github/actions/setup-node-yarn@main
+      with:
+        cache-key-prefix: ${{ inputs.deps-cache-key-prefix }}
+        working-directory: ${{ inputs.working-directory }}
+        extra-paths: ${{ inputs.extra-paths }}
+        extra-cache-key-glob-1: ${{ inputs.extra-deps-cache-key-glob-1 }}
+        extra-cache-key-glob-2: ${{ inputs.extra-deps-cache-key-glob-2 }}
+        ssh-deploy-key: ${{ inputs.ssh-deploy-key }}
+        gh-token: ${{ inputs.gh-token }}
+        cache-write: ${{ inputs.cache-write }}
+
+    - name: Restore ${{ inputs.cache-key-prefix }} cache (read-only)
+      if: inputs.cache-path != '' && inputs.cache-write != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ inputs.working-directory }}/${{ inputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/yarn.lock', inputs.working-directory), (inputs.cache-key-extra-glob-1 != '' && format('{0}/{1}', inputs.working-directory, inputs.cache-key-extra-glob-1)) || '', (inputs.cache-key-extra-glob-2 != '' && format('{0}/{1}', inputs.working-directory, inputs.cache-key-extra-glob-2)) || '') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-key-prefix }}-
+
+    - name: Cache ${{ inputs.cache-key-prefix }} (read+write)
+      if: inputs.cache-path != '' && inputs.cache-write == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ inputs.working-directory }}/${{ inputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/yarn.lock', inputs.working-directory), (inputs.cache-key-extra-glob-1 != '' && format('{0}/{1}', inputs.working-directory, inputs.cache-key-extra-glob-1)) || '', (inputs.cache-key-extra-glob-2 != '' && format('{0}/{1}', inputs.working-directory, inputs.cache-key-extra-glob-2)) || '') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-key-prefix }}-
+
+    - name: Run yarn ${{ inputs.script }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        GITHUB_TOKEN: ${{ inputs.gh-token }}
+      run: yarn ${{ inputs.script }} ${{ inputs.script-args }}
