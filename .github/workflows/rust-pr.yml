@@ -1,0 +1,663 @@
+name: Rust PR engine
+
+# Shared reusable engine for the Rust repos' PR-time CI (mecha10, mecha10-api, mecha10-nodes).
+#
+# Scope: only the jobs that are genuinely portable across all three callers with no job-graph
+# dependency on a repo-specific job. Explicitly NOT here (stays in each caller's own thin
+# orchestrator pr.yml - see README.md's "Reusable workflows" section for the per-repo shape):
+#   - clippy/test SHARD matrices + their aggregator jobs (mecha10, mecha10-api) - a matrix output
+#     a reusable workflow emits can't be fanned back into a caller's own `needs:` graph the way
+#     these aggregators require.
+#   - advisory scan jobs with cross-runner report posting (dead_code_duplicate_code,
+#     file_size_tech_debt, ignored-tests, useless-test-scan, unused-pub, post-scan-comments,
+#     config-lint, quality-check, rust_scans, tech-debt) - these run bespoke per-repo scripts and
+#     post from a separate node-capable runner than the scan itself; collapsing that split was
+#     explicitly ruled out.
+#   - changeset-check, hakari, build, ci-auth/ci-relay/ci-payments service splits,
+#     release-scripts-tests, shell_lib_tests - repo-specific job-graph shape, not shared logic.
+#   - file-linear-tickets - its `needs:`/entries list is a different set of upstream jobs per
+#     repo; the composite action it calls is already shared, only the wrapping job isn't.
+#   - required-checks - MUST stay a caller-side job named exactly as today. A job inside a called
+#     reusable workflow is reported to GitHub as `<caller-job-id> / <job-name>`, which already
+#     broke required-status-check matching three times in this migration. See README.md for the
+#     exact aggregator each repo keeps.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on-rust:
+        description: Runner label for Rust-toolchain jobs (fmt, clippy, test, coverage, dependency-audit, cargo-machete/mutants).
+        type: string
+        required: false
+        default: arc-catfood-rust
+      runs-on-minimal:
+        description: Runner label for lightweight non-Rust jobs (changes, actionlint, fragment-check).
+        type: string
+        required: false
+        default: arc-catfood-minimal
+      working-directory:
+        description: Directory (relative to repo root) to run cargo commands in. Defaults to repo root.
+        type: string
+        required: false
+        default: '.'
+      install-libudev:
+        description: Install libudev-dev before building (needed by crates using udev/serial-enumeration).
+        type: boolean
+        required: false
+        default: false
+      fast-linker:
+        description: Use clang+mold as the link-heavy jobs' linker (clippy/test/coverage), via setup-rust's fast-linker input.
+        type: boolean
+        required: false
+        default: false
+
+      enable_actionlint:
+        description: Run the actionlint composite action against .github/workflows.
+        type: boolean
+        required: false
+        default: false
+      enable_changes:
+        description: Run dorny/paths-filter + affected-crates computation. Required by fmt/clippy/test/coverage when they want crate-scoped runs.
+        type: boolean
+        required: false
+        default: false
+      compute-affected-crates-script:
+        description: Path (relative to working-directory) to the repo's own affected-crates script. Only consulted when enable_changes is true.
+        type: string
+        required: false
+        default: scripts/ci/compute-affected-crates.sh
+      enable_fmt:
+        description: Run cargo fmt --check via the rust-fmt composite action.
+        type: boolean
+        required: false
+        default: false
+      enable_clippy:
+        description: Run cargo clippy via the rust-clippy composite action. Unsharded - a repo needing shards keeps that matrix in its own caller.
+        type: boolean
+        required: false
+        default: false
+      enable_test:
+        description: Run cargo nextest via inline steps (nextest has no composite action yet). Unsharded.
+        type: boolean
+        required: false
+        default: false
+      enable_doctest:
+        description: Run cargo test --doc. Independent of enable_test so a caller can run it in the same or a separate job budget.
+        type: boolean
+        required: false
+        default: false
+      cargo-fallback-script:
+        description: Path (relative to working-directory) to the repo's cargo-with-sccache-fallback.sh wrapper. Used by the test/doctest/dependency-audit jobs.
+        type: string
+        required: false
+        default: scripts/ci/cargo-with-sccache-fallback.sh
+      sccache-cache-mode-script:
+        description: Path (relative to working-directory) to the repo's setup-sccache-cache-mode.sh. Used by the test job.
+        type: string
+        required: false
+        default: scripts/ci/setup-sccache-cache-mode.sh
+      enable_coverage:
+        description: Run cargo-llvm-cov via the rust-coverage composite action and upload to Codecov. Always advisory (continue-on-error) - never wire this into a required check.
+        type: boolean
+        required: false
+        default: false
+      enable_dependency_audit:
+        description: Run cargo audit (advisory).
+        type: boolean
+        required: false
+        default: false
+      enable_cargo_machete:
+        description: Run cargo-machete (advisory) and post a sticky PR comment.
+        type: boolean
+        required: false
+        default: false
+      cargo-machete-version:
+        type: string
+        required: false
+        default: '0.9.2'
+      enable_cargo_mutants:
+        description: Run cargo-mutants scoped to the PR diff (advisory, pull_request only) and post a sticky PR comment.
+        type: boolean
+        required: false
+        default: false
+      cargo-mutants-version:
+        type: string
+        required: false
+        default: '27.1.0'
+      enable_fragment_check:
+        description: Run the changeset/release-fragment presence check (mecha10-nodes' fragment-check job shape).
+        type: boolean
+        required: false
+        default: false
+      fragment-check-nodes-script:
+        description: Path to the repo's build-nodes --print-nodes script, used to detect which tracked units changed.
+        type: string
+        required: false
+        default: scripts/release/build_nodes.py
+      fragment-check-present-script:
+        type: string
+        required: false
+        default: scripts/release/fragment-template/check-fragment-present.sh
+      fragment-check-tracked-paths-lib:
+        type: string
+        required: false
+        default: scripts/ci/lib/fragment-tracked-paths.sh
+      fragment-check-changes-dir:
+        type: string
+        required: false
+        default: .changes
+
+    outputs:
+      crate-scope:
+        description: changes job's scope output ("workspace"/"subset"/"none"). Empty if enable_changes is false.
+        value: ${{ jobs.changes.outputs.crate-scope }}
+      affected-crates:
+        value: ${{ jobs.changes.outputs.affected-crates }}
+      actionlint_outcome:
+        value: ${{ jobs.actionlint.outputs.outcome }}
+      actionlint_report:
+        value: ${{ jobs.actionlint.outputs.report }}
+      fmt_outcome:
+        value: ${{ jobs.fmt.outputs.outcome }}
+      fmt_report:
+        value: ${{ jobs.fmt.outputs.report }}
+      clippy_outcome:
+        value: ${{ jobs.clippy.outputs.outcome }}
+      clippy_report:
+        value: ${{ jobs.clippy.outputs.report }}
+      test_outcome:
+        value: ${{ jobs.test.outputs.outcome }}
+      doctest_outcome:
+        value: ${{ jobs.doctest.outputs.outcome }}
+      dependency_audit_outcome:
+        value: ${{ jobs.dependency-audit.outputs.outcome }}
+
+jobs:
+  changes:
+    name: Detect changes
+    if: inputs.enable_changes
+    runs-on: ${{ inputs.runs-on-minimal }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      crate-scope: ${{ steps.affected.outputs.scope }}
+      affected-crates: ${{ steps.affected.outputs.crates }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v4
+        id: filter
+        continue-on-error: true
+        with:
+          list-files: shell
+          filters: |
+            all:
+              - '**'
+
+      - name: Install stable Rust toolchain
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+
+      - name: Compute affected Rust crates
+        id: affected
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -o pipefail
+          chmod +x "${{ inputs.compute-affected-crates-script }}"
+
+          if [ "${{ steps.filter.outcome }}" != "success" ]; then
+            echo "scope=workspace" >> "$GITHUB_OUTPUT"
+            echo "crates=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RESULT=$(printf '%s\n' ${{ steps.filter.outputs.all_files }} | "./${{ inputs.compute-affected-crates-script }}" " ")
+          SCOPE=$(printf '%s\n' "$RESULT" | sed -n 's/^scope=//p')
+          CRATES=$(printf '%s\n' "$RESULT" | sed -n 's/^crates=//p')
+
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "crates=$CRATES" >> "$GITHUB_OUTPUT"
+
+  actionlint:
+    name: actionlint
+    if: inputs.enable_actionlint
+    runs-on: ${{ inputs.runs-on-minimal }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.scan.outputs.outcome }}
+      report: ${{ steps.scan.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: scan
+        uses: mecha-industries/mecha10-actions/.github/actions/actionlint@main
+
+      - if: steps.scan.outputs.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  fmt:
+    name: fmt
+    if: inputs.enable_fmt
+    needs: [changes]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.fmt.outputs.outcome }}
+      report: ${{ steps.fmt.outputs.report }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install libudev-dev
+        if: inputs.install-libudev
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: cargo fmt --check
+        id: fmt
+        uses: mecha-industries/mecha10-actions/.github/actions/rust-fmt@main
+        with:
+          crate-scope: ${{ needs.changes.outputs.crate-scope || 'workspace' }}
+          affected-crates: ${{ needs.changes.outputs.affected-crates }}
+          working-directory: ${{ inputs.working-directory }}
+          cargo-profile-dev-debug: ''
+
+      - if: steps.fmt.outputs.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  clippy:
+    name: clippy
+    if: inputs.enable_clippy
+    needs: [changes, fmt]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install libudev-dev
+        if: inputs.install-libudev
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Install stable Rust toolchain
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+        with:
+          fast-linker: ${{ inputs.fast-linker }}
+
+      - name: cargo clippy
+        id: clippy
+        uses: mecha-industries/mecha10-actions/.github/actions/rust-clippy@main
+        with:
+          crate-scope: ${{ needs.changes.outputs.crate-scope || 'workspace' }}
+          affected-crates: ${{ needs.changes.outputs.affected-crates }}
+          working-directory: ${{ inputs.working-directory }}
+          cargo-profile-dev-debug: ''
+
+      - if: steps.clippy.outputs.outcome == 'failure'
+        shell: bash
+        run: exit 1
+    outputs:
+      outcome: ${{ steps.clippy.outputs.outcome }}
+      report: ${{ steps.clippy.outputs.report }}
+
+  test:
+    name: test
+    if: inputs.enable_test
+    needs: [changes, fmt]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.nextest.outcome }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install libudev-dev
+        if: inputs.install-libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Install stable Rust toolchain
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+        with:
+          enable-rust-cache: false
+          fast-linker: ${{ inputs.fast-linker }}
+
+      - name: Cache cargo registry/git/target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ inputs.working-directory }}/target
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Configure sccache cache mode (main writes, branches read-only)
+        run: |
+          chmod +x "${{ inputs.sccache-cache-mode-script }}"
+          "./${{ inputs.sccache-cache-mode-script }}"
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: cargo nextest run
+        id: nextest
+        run: |
+          set -o pipefail
+          chmod +x "${{ inputs.cargo-fallback-script }}"
+          SCOPE_ARGS=(--workspace)
+          if [ "${{ needs.changes.outputs.crate-scope }}" = "subset" ]; then
+            SCOPE_ARGS=()
+            for c in ${{ needs.changes.outputs.affected-crates }}; do
+              SCOPE_ARGS+=(-p "$c")
+            done
+          fi
+          "./${{ inputs.cargo-fallback-script }}" cargo nextest run "${SCOPE_ARGS[@]}"
+
+  doctest:
+    name: doctest
+    if: inputs.enable_doctest
+    needs: [changes, fmt]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.doctest.outcome }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install libudev-dev
+        if: inputs.install-libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Install stable Rust toolchain
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+        with:
+          fast-linker: ${{ inputs.fast-linker }}
+
+      - name: cargo test --doc
+        id: doctest
+        run: |
+          chmod +x "${{ inputs.cargo-fallback-script }}"
+          "./${{ inputs.cargo-fallback-script }}" cargo test --doc
+
+  coverage:
+    # Advisory only - never return this as part of a required check; it is always
+    # continue-on-error so a coverage dip never fails the job or the PR.
+    name: coverage
+    if: inputs.enable_coverage
+    needs: [changes, fmt]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust coverage (cargo-llvm-cov)
+        continue-on-error: true
+        uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage@main
+        with:
+          crate-scope: ${{ needs.changes.outputs.crate-scope || 'workspace' }}
+          affected-crates: ${{ needs.changes.outputs.affected-crates }}
+
+      - name: Upload coverage to Codecov
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: lcov.info
+
+  dependency-audit:
+    # Advisory only - never gates. cargo audit statically checks Cargo.lock, so no test binary
+    # ever executes here; keep CARGO_PROFILE_DEV_DEBUG unset to avoid wasted debug-info builds.
+    name: dependency-audit
+    if: inputs.enable_dependency_audit
+    needs: [changes]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ steps.scan.outcome }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: scan
+        continue-on-error: true
+        run: |
+          chmod +x "${{ inputs.cargo-fallback-script }}"
+          "./${{ inputs.cargo-fallback-script }}" cargo audit
+
+  cargo-machete:
+    # Advisory only - unused-dependency scan, never gates; posts its own sticky PR comment.
+    name: cargo-machete (unused deps)
+    if: inputs.enable_cargo_machete
+    needs: [fmt]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust toolchain
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+
+      - name: Cache cargo-machete binary
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-machete
+          key: ${{ runner.os }}-cargo-machete-${{ inputs.cargo-machete-version }}
+
+      - name: Install cargo-machete
+        run: command -v cargo-machete || cargo install cargo-machete --locked --version "${{ inputs.cargo-machete-version }}"
+
+      - name: cargo machete
+        id: scan
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo machete --with-metadata 2>&1 | tee cargo-machete-report.txt
+
+      - name: Build PR comment body
+        if: always() && github.event_name == 'pull_request'
+        id: report
+        run: |
+          {
+            echo "body<<CARGO_MACHETE_EOF"
+            if [[ "${{ steps.scan.outcome }}" == "success" ]]; then
+              echo "✅ **cargo-machete**: no unused dependencies found."
+            else
+              echo "⚠️ **cargo-machete** (advisory, does not block merge) found possibly-unused dependencies:"
+              echo
+              echo '```'
+              cat cargo-machete-report.txt
+              echo '```'
+            fi
+            echo "CARGO_MACHETE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post sticky PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: cargo-machete
+          message: ${{ steps.report.outputs.body }}
+
+  cargo-mutants:
+    # Advisory only, scoped to the PR's own *.rs diff. Skipped outright on push-to-main (no PR
+    # diff to scope to) and when the diff touches no .rs lines.
+    name: cargo-mutants (PR diff)
+    if: inputs.enable_cargo_mutants && github.event_name == 'pull_request'
+    needs: [fmt]
+    runs-on: ${{ inputs.runs-on-rust }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install stable Rust toolchain
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+
+      - name: Install libudev-dev
+        if: inputs.install-libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Compute PR diff (*.rs only)
+        id: diff
+        run: |
+          set -euo pipefail
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1
+          git diff "origin/${{ github.event.pull_request.base.ref }}"...HEAD -- '*.rs' > pr.diff
+          if [[ -s pr.diff ]]; then
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache cargo-mutants binary
+        if: steps.diff.outputs.has_diff == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: ${{ runner.os }}-cargo-mutants-${{ inputs.cargo-mutants-version }}
+
+      - name: Install cargo-mutants
+        if: steps.diff.outputs.has_diff == 'true'
+        run: command -v cargo-mutants || cargo install cargo-mutants --locked --version "${{ inputs.cargo-mutants-version }}"
+
+      - name: cargo mutants --in-diff
+        id: scan
+        if: steps.diff.outputs.has_diff == 'true'
+        continue-on-error: true
+        run: cargo mutants --in-diff pr.diff --no-shuffle
+
+      - name: Upload cargo-mutants report
+        if: always() && steps.diff.outputs.has_diff == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-mutants-report
+          path: ${{ inputs.working-directory }}/mutants.out
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Build PR comment body
+        if: always() && steps.diff.outputs.has_diff == 'true'
+        id: report
+        run: |
+          {
+            echo "body<<CARGO_MUTANTS_EOF"
+            if [[ -s mutants.out/missed.txt ]]; then
+              echo "⚠️ **cargo-mutants** (advisory, does not block merge) found mutants that survived this PR's test suite - these lines may not be actually verified by a test:"
+              echo
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+              echo
+              echo "Full report: see the \`cargo-mutants-report\` artifact on this workflow run."
+            elif [[ "${{ steps.scan.outcome }}" == "success" ]]; then
+              echo "✅ **cargo-mutants**: no surviving mutants found in this PR's diff."
+            else
+              echo "⚠️ **cargo-mutants** (advisory, does not block merge) did not complete its scan (the \`cargo mutants\` step itself errored, e.g. a baseline build failure) - see this workflow run's logs and the \`cargo-mutants-report\` artifact, if present."
+            fi
+            echo "CARGO_MUTANTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post sticky PR comment
+        if: always() && steps.diff.outputs.has_diff == 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: cargo-mutants
+          message: ${{ steps.report.outputs.body }}
+
+  fragment-check:
+    name: Changeset fragment check
+    if: inputs.enable_fragment_check && github.event_name == 'pull_request'
+    runs-on: ${{ inputs.runs-on-minimal }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed tracked units vs PR base
+        id: nodes
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+
+          # shellcheck source=/dev/null
+          source "${{ inputs.fragment-check-tracked-paths-lib }}"
+          CHANGED_FILES=$(git diff --name-only "$BASE...HEAD")
+
+          if fragment_diff_is_tooling_only "$CHANGED_FILES"; then
+            echo "Diff is confined to release-tooling/CI paths - not a user-facing change, skipping fragment requirement."
+            echo "list=" >> "$GITHUB_OUTPUT"
+            echo "tracked=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LIST=$(python3 "${{ inputs.fragment-check-nodes-script }}" --base "$BASE" --print-nodes)
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          if [ -n "$LIST" ]; then
+            echo "tracked=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tracked=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check fragment present
+        run: |
+          chmod +x "${{ inputs.fragment-check-present-script }}"
+          "${{ inputs.fragment-check-present-script }}" \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ steps.nodes.outputs.tracked }}" \
+            "${{ steps.nodes.outputs.list }}" \
+            "${{ inputs.fragment-check-changes-dir }}"

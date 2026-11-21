@@ -665,6 +665,87 @@ A repo whose branch protection does not gate on Security Scan (mecha10-dashboard
 mecha10-nodes, user-tools) needs no aggregator job and can simply leave
 `enable-required-checks: false`.
 
+### rust-pr.yml
+
+The shared engine behind the three Rust repos' PR-time `pr.yml`: `changes` (paths-filter +
+affected-crate scoping), `actionlint`, `fmt`, `clippy`, `test`/`doctest`, `coverage`,
+`dependency-audit`, `cargo-machete`, `cargo-mutants`, and `fragment-check` — every one gated behind
+its own `enable_*` input, off by default, so a caller only pays for the jobs it asks for.
+
+**Deliberately NOT in the engine** (see the comment block at the top of `rust-pr.yml` for the full
+list): clippy/test shard matrices + their aggregators, the advisory scan jobs that post sticky
+comments from a separate node-capable runner (`dead_code_duplicate_code`,
+`file_size_tech_debt`, `ignored-tests`, `useless-test-scan`, `unused-pub`, `post-scan-comments`,
+`config-lint`, `quality-check`, `rust_scans`, `tech-debt`), `changeset-check`/`hakari`/`build`/the
+`ci-auth`/`ci-relay`/`ci-payments` per-service splits, `release-scripts-tests`, `shell_lib_tests`,
+and `file-linear-tickets`. All of these are either job-graph-bound (their `needs:` references a
+repo-specific job the engine can't see) or run bespoke per-repo scripts with no shared logic to
+hoist — they stay in each repo's own caller `pr.yml`.
+
+`required-checks` **always stays in the caller**, named exactly as branch protection expects today
+— see the "Required-check naming" warning above; the same risk applies here; verified per repo
+below.
+
+Minimal thin-caller example (mecha10-nodes shape — single workspace, no sharding):
+
+```yaml
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# pull-requests: read is required by dorny/paths-filter (enable_changes); pull-requests: write
+# is required by cargo-machete/cargo-mutants' sticky-comment posting. A reusable workflow's job
+# can never hold more permission than its caller grants here.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  rust-pr:
+    uses: mecha-industries/mecha10-actions/.github/workflows/rust-pr.yml@main
+    secrets: inherit
+    with:
+      enable_changes: true
+      enable_fmt: true
+      enable_clippy: true
+      enable_test: true
+      enable_doctest: true
+      enable_coverage: true
+      enable_cargo_machete: true
+      enable_cargo_mutants: true
+      enable_fragment_check: true
+
+  # Repo-specific, stays in the caller: shell_lib_tests (bash/python smoke tests over
+  # scripts/ci/lib and scripts/release), and everything required-checks below needs.
+  shell_lib_tests:
+    # ... unchanged from today's pr.yml ...
+    runs-on: arc-catfood-minimal
+
+  required-checks:
+    name: CI required checks     # exactly the branch-protection context name
+    needs: [rust-pr, shell_lib_tests]
+    if: always()
+    runs-on: arc-catfood-minimal
+    timeout-minutes: 10
+    steps:
+      - if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
+```
+
+mecha10 and mecha10-api additionally pass `enable_actionlint: true` and `enable_dependency_audit:
+true`, keep their clippy/test shard matrices, hakari/changeset-check/build/scan jobs, and
+`file-linear-tickets` entirely in the caller, and their `required-checks` jobs list both the
+engine's call job and every one of those caller-only jobs in `needs:` — see the PR description for
+the full per-repo table.
+
 ## Adding more shared actions
 
 Each new shared piece gets its own directory under `.github/actions/<name>/` with an
