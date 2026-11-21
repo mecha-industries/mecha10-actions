@@ -6,8 +6,8 @@ description: >
   toolchain with the clippy component via this repo's own setup-rust
   action, run `cargo clippy -- -D warnings` (optionally scoped to a crate
   subset via the crate-scope/affected-crates contract those repos' own
-  changes/detect jobs compute, optionally wrapped in the calling repo's own
-  scripts/ci/cargo-with-sccache-fallback.sh), and capture the step's
+  changes/detect jobs compute, optionally wrapped in this action's own
+  bundled cargo-with-sccache-fallback.sh), and capture the step's
   outcome plus a text report as this action's outputs. Unlike cargo fmt,
   cargo clippy does support --workspace, which this action passes when not
   scoped to a subset.
@@ -102,14 +102,19 @@ inputs:
     default: 'true'
   sccache-fallback-script:
     description: >
-      Path (relative to working-directory) to the calling repo's own
-      scripts/ci/cargo-with-sccache-fallback.sh, which wraps the cargo
-      clippy invocation to use sccache when available. All three source
-      repos keep this script locally rather than in this shared repo,
-      since it's tied to each repo's own sccache cache-mode setup. Leave
-      empty to run cargo clippy directly with no wrapper.
+      Escape hatch for a repo with a genuinely bespoke variant of the cargo
+      wrapper script. Path (relative to working-directory, inside the
+      caller's own checkout) to a script to run instead of this action's
+      bundled scripts/cargo-with-sccache-fallback.sh, which wraps the cargo
+      clippy invocation to use sccache when available and falls back to a
+      plain cargo invocation when sccache itself is missing or unavailable.
+      Leave empty (the default) to use the bundled script, a reconciled
+      superset of the three divergent copies mecha10, mecha10-api, and
+      mecha10-nodes used to keep locally - that is the right choice for
+      every repo that has not deliberately diverged. Pass the literal
+      string "none" to run cargo clippy directly with no wrapper at all.
     required: false
-    default: 'scripts/ci/cargo-with-sccache-fallback.sh'
+    default: ''
 
 outputs:
   outcome:
@@ -132,6 +137,9 @@ runs:
       continue-on-error: true
       shell: bash
       working-directory: ${{ inputs.working-directory }}
+      env:
+        SCCACHE_FALLBACK_SCRIPT: ${{ inputs.sccache-fallback-script }}
+        BUNDLED_SCCACHE_FALLBACK_SCRIPT: ${{ github.action_path }}/scripts/cargo-with-sccache-fallback.sh
       run: |
         set -o pipefail
         if [ -n "${{ inputs.cargo-profile-dev-debug }}" ]; then
@@ -145,9 +153,12 @@ runs:
           done
         fi
         RUNNER=(cargo clippy)
-        if [ -n "${{ inputs.sccache-fallback-script }}" ] && [ -f "${{ inputs.sccache-fallback-script }}" ]; then
-          chmod +x "${{ inputs.sccache-fallback-script }}"
-          RUNNER=("${{ inputs.sccache-fallback-script }}" cargo clippy)
+        if [ "$SCCACHE_FALLBACK_SCRIPT" != "none" ]; then
+          script="${SCCACHE_FALLBACK_SCRIPT:-$BUNDLED_SCCACHE_FALLBACK_SCRIPT}"
+          if [ -f "$script" ]; then
+            chmod +x "$script"
+            RUNNER=("$script" cargo clippy)
+          fi
         fi
         "${RUNNER[@]}" "${SCOPE_ARGS[@]}" -- -D warnings 2>&1 | tee clippy-report.txt
 
