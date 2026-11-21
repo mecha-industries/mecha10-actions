@@ -1,19 +1,34 @@
 name: Commit and push writeback
 description: >
   Stages the given paths, commits them, and pushes the commit directly to the repo's
-  default branch, rebasing over any concurrent commit (a parallel PR merge, a version-bump
-  push, etc.) that lands on that branch between checkout and push - retrying the
-  fetch/rebase/push cycle up to `max-retries` times. Centralizes the writeback mechanics
-  duplicated across the `update-status-table` jobs in mecha10-api, mecha10-dashboard, and
-  mecha10-rl. Never force-pushes and never hard-resets over the remote branch; a rebase
-  conflict (someone else editing the same generated file) fails the step loudly instead of
-  silently discarding either side. What stays out of scope, and must stay in the caller: the
-  content generation itself (what changed and which script built it), and the job-level
-  `needs:`, `concurrency:`, `permissions: contents: write`, and `if:` skip guard - a
-  composite action cannot contribute to another job's `needs:` graph or declare job-level
-  `if:`/`concurrency:`/`permissions:`, so the calling job must keep declaring all of those,
-  including an `if:` that skips runs whose own commit message matches `commit-message` below
-  (so this job's writeback commit doesn't retrigger itself).
+  default branch, retrying on push rejection (a parallel PR merge, a version-bump push,
+  etc. landing on that branch between checkout and push) up to `max-retries` times.
+  Centralizes the writeback mechanics duplicated across the `update-status-table` jobs in
+  mecha10-api, mecha10-dashboard, and mecha10-rl. This action deliberately does NOT run
+  actions/checkout - like this repo's trivy-scan, setup-rust, rust-fmt, and rust-clippy
+  actions, it runs mid-job after the calling job has already checked out the repository
+  with the PAT (not GITHUB_TOKEN, so the resulting remote is push-authenticated) and
+  `fetch-depth: 0` (so retries can resync against full history), and generated the content
+  to be committed - a second checkout here would clobber whatever the caller's generation
+  step already produced in the workspace. The files named in `paths` must already be
+  modified in the workspace by the time this action runs.
+
+  Two retry modes, chosen via `retry-mode`. `rebase` (the default, unchanged behaviour):
+  on push rejection, fetch and rebase the existing writeback commit onto the new remote
+  head, replaying the diff; a rebase conflict (someone else editing the same generated
+  section) fails the step loudly instead of silently discarding either side. `regenerate`:
+  on push rejection, drop the stale writeback commit, resync to the new remote head,
+  re-run the caller-supplied `regenerate-command` from scratch against that new base, and
+  re-commit only if the regenerated output still differs - avoiding a spurious rebase
+  conflict from an unrelated concurrent edit near the generated content. Never
+  force-pushes and never hard-resets over the remote branch itself (only over this
+  action's own prior local commit). What stays out of scope, and must stay in the caller:
+  the content generation itself (what changed and which script built it), the checkout,
+  and the job-level `needs:`, `concurrency:`, `permissions: contents: write`, and `if:`
+  skip guard - a composite action cannot contribute to another job's `needs:` graph or
+  declare job-level `if:`/`concurrency:`/`permissions:`, so the calling job must keep
+  declaring all of those, including an `if:` that skips runs whose own commit message
+  matches `commit-message` below (so this job's writeback commit doesn't retrigger itself).
 
 inputs:
   gh-pat:
@@ -34,9 +49,22 @@ inputs:
     required: false
     default: "main"
   max-retries:
-    description: Number of fetch/rebase/push attempts before failing the step.
+    description: Number of push attempts before failing the step.
     required: false
     default: "3"
+  retry-mode:
+    description: >
+      Push-rejection retry strategy: "rebase" (default - fetch and rebase the existing
+      writeback commit onto the new remote head) or "regenerate" (drop the stale commit,
+      resync, re-run regenerate-command, and re-commit only if still different).
+    required: false
+    default: "rebase"
+  regenerate-command:
+    description: >
+      Shell command to re-run the content generation from scratch against the resynced
+      base. Required when retry-mode is "regenerate"; ignored otherwise.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -51,11 +79,16 @@ runs:
           exit 1
         fi
 
-    - name: Checkout code
-      uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-        token: ${{ inputs.gh-pat }}
+    - name: Verify regenerate-command is configured for regenerate mode
+      shell: bash
+      env:
+        WRITEBACK_RETRY_MODE: ${{ inputs.retry-mode }}
+        WRITEBACK_REGENERATE_COMMAND: ${{ inputs.regenerate-command }}
+      run: |
+        if [ "$WRITEBACK_RETRY_MODE" = "regenerate" ] && [ -z "$WRITEBACK_REGENERATE_COMMAND" ]; then
+          echo "::error::retry-mode is 'regenerate' but regenerate-command is empty. Pass the shell command that regenerates the committed paths from scratch, or switch retry-mode back to 'rebase'."
+          exit 1
+        fi
 
     - name: Configure git identity
       shell: bash
@@ -63,7 +96,7 @@ runs:
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git config --global user.name "GitHub Actions"
 
-    - name: Commit and push with rebase retry
+    - name: Commit and push with retry
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh-pat }}
@@ -71,6 +104,8 @@ runs:
         WRITEBACK_COMMIT_MESSAGE: ${{ inputs.commit-message }}
         WRITEBACK_TARGET_BRANCH: ${{ inputs.target-branch }}
         WRITEBACK_MAX_RETRIES: ${{ inputs.max-retries }}
+        WRITEBACK_RETRY_MODE: ${{ inputs.retry-mode }}
+        WRITEBACK_REGENERATE_COMMAND: ${{ inputs.regenerate-command }}
       run: |
         set -euo pipefail
 
@@ -95,5 +130,21 @@ runs:
           sleep 5
 
           git fetch origin "$WRITEBACK_TARGET_BRANCH"
-          git rebase "origin/${WRITEBACK_TARGET_BRANCH}"
+
+          if [ "$WRITEBACK_RETRY_MODE" = "regenerate" ]; then
+            git reset --hard "origin/${WRITEBACK_TARGET_BRANCH}"
+
+            eval "$WRITEBACK_REGENERATE_COMMAND"
+
+            git add -- $WRITEBACK_PATHS
+
+            if git diff --cached --quiet; then
+              echo "Regenerated output matches the new base, nothing to push"
+              exit 0
+            fi
+
+            git commit -m "$WRITEBACK_COMMIT_MESSAGE"
+          else
+            git rebase "origin/${WRITEBACK_TARGET_BRANCH}"
+          fi
         done
