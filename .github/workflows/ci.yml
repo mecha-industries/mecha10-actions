@@ -18,3 +18,15 @@ jobs:
           set -o pipefail
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.12
           ./actionlint -color
+
+  shell-script-tests:
+    name: shell script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run notify-slack script tests
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x .github/actions/notify-slack/scripts/notify-release-slack.test.sh
+          .github/actions/notify-slack/scripts/notify-release-slack.test.sh
