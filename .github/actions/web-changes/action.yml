@@ -1,0 +1,141 @@
+name: Web changes
+description: >
+  Shared path-filter outputs for a web/Next.js repo's PR and push CI workflows — hoisted from
+  mecha-industries/mecha10-dashboard's local action of the same name. Checks out the repo itself
+  (dorny/paths-filter needs the base and head refs present), mirroring the source action.
+
+outputs:
+  workflows:
+    description: .github/workflows/** changed.
+    value: ${{ steps.filter.outputs.workflows }}
+  react_ui:
+    description: .tsx/.jsx changed.
+    value: ${{ steps.filter.outputs.react_ui }}
+  web_source:
+    description: Any TS/JS source file changed.
+    value: ${{ steps.filter.outputs.web_source }}
+  web_deps:
+    description: package.json/lockfile changed.
+    value: ${{ steps.filter.outputs.web_deps }}
+  tsconfig:
+    description: tsconfig*.json changed.
+    value: ${{ steps.filter.outputs.tsconfig }}
+  eslint_config:
+    description: .eslintrc*/eslint.config.* changed.
+    value: ${{ steps.filter.outputs.eslint_config }}
+  jest_config:
+    description: jest.config.*/vitest.config.* changed.
+    value: ${{ steps.filter.outputs.jest_config }}
+  web:
+    description: Full union - anything build/e2e/setup would care about.
+    value: ${{ steps.filter.outputs.web }}
+  ls_lint:
+    description: Source or .ls-lint.yml changed.
+    value: ${{ steps.filter.outputs.ls_lint }}
+  any:
+    description: >
+      Any file at all changed. Deploy must gate on this, not web_filter's web output - web
+      only matches known code/config extensions, so a real change to something outside that
+      list (Dockerfile, .env.example, a JSON data file, an image asset not under public/, etc.)
+      would otherwise leave web false and silently skip deploy despite main genuinely changing.
+    value: ${{ steps.filter.outputs.any }}
+  image:
+    description: >
+      Anything that would change the built Docker image: app source, deps
+      (package.json/lockfile), build-affecting config, public/ assets, or
+      the Dockerfile/image-build scripts themselves. Used to gate a
+      publish-image job so a push that only touches docs, CI
+      config for unrelated jobs, etc. doesn't trigger a pointless
+      rebuild-and-push (and the dangling :latest image that leaves
+      behind on the deploy host).
+    value: ${{ steps.filter.outputs.image }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+    - uses: dorny/paths-filter@v4
+      id: filter
+      with:
+        filters: |
+          workflows:
+            - '.github/workflows/**'
+          react_ui:
+            - '**/*.tsx'
+            - '**/*.jsx'
+          web_source:
+            - '**/*.ts'
+            - '**/*.tsx'
+            - '**/*.js'
+            - '**/*.jsx'
+            - '**/*.mjs'
+            - '**/*.cjs'
+          web_deps:
+            - '**/package.json'
+            - '**/yarn.lock'
+            - '**/pnpm-lock.yaml'
+            - '**/.yarnrc.yml'
+          tsconfig:
+            - '**/tsconfig*.json'
+          eslint_config:
+            - '**/.eslintrc*'
+            - '**/eslint.config.*'
+          jest_config:
+            - '**/jest.config.*'
+            - '**/vitest.config.*'
+          web:
+            - '**/*.ts'
+            - '**/*.tsx'
+            - '**/*.js'
+            - '**/*.jsx'
+            - '**/*.mjs'
+            - '**/*.cjs'
+            - '**/package.json'
+            - '**/yarn.lock'
+            - '**/pnpm-lock.yaml'
+            - '**/.yarnrc.yml'
+            - '**/tsconfig*.json'
+            - '**/.eslintrc*'
+            - '**/eslint.config.*'
+            - '**/jest.config.*'
+            - '**/vitest.config.*'
+            - '**/next.config.*'
+            - '**/tailwind.config.*'
+            - '**/postcss.config.*'
+            - '**/*.css'
+            - '**/*.scss'
+            - '**/public/**'
+          ls_lint:
+            - '**/*.ts'
+            - '**/*.tsx'
+            - '**/*.js'
+            - '**/*.jsx'
+            - '**/*.mjs'
+            - '**/*.cjs'
+            - '.ls-lint.yml'
+          image:
+            - '**/*.ts'
+            - '**/*.tsx'
+            - '**/*.js'
+            - '**/*.jsx'
+            - '**/*.mjs'
+            - '**/*.cjs'
+            - '**/package.json'
+            - '**/yarn.lock'
+            - '**/pnpm-lock.yaml'
+            - '**/.yarnrc.yml'
+            - '**/tsconfig*.json'
+            - '**/next.config.*'
+            - '**/tailwind.config.*'
+            - '**/postcss.config.*'
+            - '**/*.css'
+            - '**/*.scss'
+            - 'public/**'
+            - '.node-version'
+            - '.npmrc'
+            - 'Dockerfile'
+            - '.dockerignore'
+            - 'docker-entrypoint.sh'
+            - 'scripts/generate-runtime-env.sh'
+          any:
+            - '**'
