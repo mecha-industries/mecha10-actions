@@ -70,9 +70,14 @@ on:
         type: boolean
         default: true
       ci-failure-ticket-script-path:
-        description: Path, in the caller's checked-out repo, to its own ticket-filing script.
+        description: >
+          Escape hatch for a repo with a genuinely bespoke variant of the ticket-filing script.
+          Path, in the caller's checked-out repo, to a script to run instead of
+          ci-failure-ticket's bundled scripts/file-ci-failure-ticket.sh. Leave empty (the
+          default) to use the bundled script - that is the right choice for every repo that has
+          not deliberately diverged.
         type: string
-        default: 'scripts/ci/file-ci-failure-ticket.sh'
+        default: ''
       workflow-name:
         description: Human-readable label passed to ci-failure-ticket, e.g. "Security Scan".
         type: string
