@@ -1,24 +1,47 @@
 name: CI failure ticket
 description: >
-  Files a Linear ticket for a failed CI job. Replaces the checkout + "File CI failure ticket"
-  step pair duplicated near byte-for-byte across mecha-industries repos' security.yml/ci.yml/
-  main.yml ci-failure-ticket jobs. The caller's job still owns the `needs: [...]` and
-  `if: always() && contains(needs.*.result, 'failure')` gating and the `ci-failure-ticket`
-  job name itself - those are job-level edges that cannot move into a composite action. This
-  action only centralizes the step body: checking out the repo and invoking the repo's own
-  ticket-filing script.
+  Files a Linear ticket for a failed CI job, or comments on the existing open
+  one for this repo+workflow instead of creating a duplicate. Ships its own
+  reconciled copy of file-ci-failure-ticket.sh - the script that used to be
+  duplicated per repo across mecha10, mecha10-api, mecha10-nodes, mecha10-rl,
+  mecha10-dashboard, mecha10-deploy, mecha10-assets, and user-tools - at
+  scripts/file-ci-failure-ticket.sh inside this action's own directory, and
+  invokes it directly off disk via github.action_path by default. The
+  caller's job still owns the `needs: [...]` and `if: always() &&
+  contains(needs.*.result, 'failure')` gating and the `ci-failure-ticket`
+  job name itself - those are job-level edges that cannot move into a
+  composite action. This action always runs actions/checkout first: even
+  the bundled-script path may run against a caller-specific checkout
+  (e.g. a monorepo subpath), and the script-path override needs the
+  caller's own checkout to exist. A caller overriding script-path to point
+  at a path inside its own checkout does not need to run actions/checkout
+  itself - this action already does.
 
 inputs:
   workflow-name:
-    description: Human-readable label for the failed workflow, passed as the script's first argument (e.g. "Security Scan", "CI").
+    description: Human-readable label for the failed workflow, passed as the bundled script's first argument (e.g. "Security Scan", "CI").
     required: true
-  script-path:
-    description: Path to the repo's own ticket-filing script.
-    required: false
-    default: "scripts/ci/file-ci-failure-ticket.sh"
   linear-api-key:
     description: Linear API key; the caller passes its secrets.LINEAR_API_KEY.
     required: true
+  extra-label-ids:
+    description: >
+      JSON array of additional Linear label IDs to attach beyond the
+      universal CI label - e.g. a language or surface label. Default [] (CI
+      label only), matching the current behavior of every repo except
+      mecha10/mecha10-nodes (Rust label) and mecha10-dashboard (Web label).
+    required: false
+    default: "[]"
+  script-path:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the
+      ticket-filing script. Path (relative to the caller's own checkout) to
+      a script to run instead of this action's bundled
+      scripts/file-ci-failure-ticket.sh. Leave empty (the default) to use
+      the bundled script - that is the right choice for every repo that has
+      not deliberately diverged.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -30,7 +53,15 @@ runs:
       env:
         LINEAR_API_KEY: ${{ inputs.linear-api-key }}
         GITHUB_REPOSITORY: ${{ github.repository }}
+        EXTRA_LABEL_IDS: ${{ inputs.extra-label-ids }}
+        SCRIPT_PATH: ${{ inputs.script-path }}
+        BUNDLED_SCRIPT: ${{ github.action_path }}/scripts/file-ci-failure-ticket.sh
+        WORKFLOW_NAME: ${{ inputs.workflow-name }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
-        bash "${{ inputs.script-path }}" \
-          "${{ inputs.workflow-name }}" \
-          "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        set -euo pipefail
+
+        script="${SCRIPT_PATH:-$BUNDLED_SCRIPT}"
+        chmod +x "$script"
+
+        "$script" "$WORKFLOW_NAME" "$RUN_URL"
