@@ -665,6 +665,96 @@ A repo whose branch protection does not gate on Security Scan (mecha10-dashboard
 mecha10-nodes, user-tools) needs no aggregator job and can simply leave
 `enable-required-checks: false`.
 
+### rust-main.yml
+
+The shared push-to-main engine behind mecha10's and mecha10-api's `main.yml`. Covers only the
+CI-shaped jobs that are genuinely identical in spirit across both: `changes` (path-filtered
+detection via `deps-changes`), `actionlint`, `coverage` (via `rust-coverage`), `ci-failure-ticket`,
+and an optional generic `status-table` writeback job (via `commit-and-push-writeback`).
+
+**Deliberately NOT absorbed** — stays in every caller, because it's either job-graph-bound or
+repo-specific publish/deploy business logic:
+- `bump-framework`, `publish-crates`, `build-cli`/`build-launcher`/`build-node-runner` (mecha10):
+  arch-matrix legs gated on the release/bump flow, plus the actual crates.io publish.
+- `build-api`/`build-auth`/`build-relay`/`build-payments`, `release`, `trigger-deploy`
+  (mecha10-api): per-service Docker builds, versioning, and the cross-repo deploy dispatch.
+- `regenerate-schemas`, `publish-shape-catalog`, `upload-templates`, `publish-install-scripts`
+  (mecha10): artifact-specific publish steps with no non-publishing equivalent.
+- Each repo's own `detect`/`detect pending services` job *logic* also stays in the caller: mecha10
+  diffs paths via `dorny/paths-filter` directly against its own filter set, while mecha10-api scans
+  `.changes/*.md` fragments instead — genuinely different detection strategies, not a shared shape.
+  A caller that wants the engine's generic path-filter detector sets `enable-changes: true` and
+  passes its own `changes-filters`; a caller with bespoke detection (mecha10-api) leaves
+  `enable-changes: false` and forwards its own booleans into `coverage-crate-scope`/
+  `coverage-affected-crates` etc. directly.
+- "build" is intentionally absent as a standalone engine job: every build job in both repos is
+  entangled with release gating (mecha10) or image-push + deploy-trigger (mecha10-api) — there is
+  no build step left that is CI-shaped once those are excluded.
+
+**Required-check naming does not apply here.** `rust-main.yml` triggers on `push`/
+`workflow_dispatch` only, never `pull_request`, so none of its jobs are branch-protection required
+status checks — the `<caller-job-id> / <job-name>` renaming risk described above for
+`security-scan.yml` is not a concern for this engine. No consumer aggregator job is needed.
+
+#### mecha10 shape (paths-filter detect, release/publish jobs stay local)
+
+```yaml
+jobs:
+  rust-main:
+    uses: mecha-industries/mecha10-actions/.github/workflows/rust-main.yml@main
+    secrets: inherit
+    with:
+      enable-changes: true
+      changes-filters: |
+        framework:
+          - 'packages/core/**'
+          - 'Cargo.toml'
+        rust:
+          - '**/*.rs'
+          - '**/Cargo.toml'
+          - '**/Cargo.lock'
+      coverage-crate-scope: subset
+      coverage-affected-crates: ${{ ... }}   # from caller's own compute-affected-crates.sh step
+      ci-failure-workflow-name: 'Main'
+      ci-failure-extra-label-ids: '["37adccdc-90c5-4bdf-a2ff-43447949dca6"]'
+      # bump-framework/publish-crates/build-cli/build-launcher/build-node-runner/
+      # regenerate-schemas/upload-templates/publish-install-scripts/update-release-status
+      # all stay as caller-local jobs (see "Deliberately NOT absorbed" above), feeding
+      # ci-failure-extra-failed: ${{ contains(needs.*.result, 'failure') }}
+```
+
+#### mecha10-api shape (fragment-based detect stays local, status-table absorbed)
+
+```yaml
+jobs:
+  rust-main:
+    uses: mecha-industries/mecha10-actions/.github/workflows/rust-main.yml@main
+    secrets: inherit
+    with:
+      enable-changes: false   # fragment-based detect stays in a caller-local `detect` job
+      coverage-working-directory: services/api
+      coverage-flags: rust-api
+      enable-status-table: true
+      status-table-update-command: >-
+        ./scripts/ci/update-service-status-table.sh "${{ needs.build-api.result }}"
+        "${{ needs.build-auth.result }}" "${{ needs.build-relay.result }}"
+      status-table-commit-message: 'chore: update service status table'
+      status-table-skip-commit-prefix: 'chore: update service status table'
+      ci-failure-workflow-name: 'Main'
+      ci-failure-extra-failed: ${{ contains(needs.*.result, 'failure') }}
+      # build-api/build-auth/build-relay/build-payments/release/trigger-deploy stay
+      # caller-local (see "Deliberately NOT absorbed" above).
+```
+
+**Caller `permissions:` requirements**: `contents: write` at the workflow level (status-table and
+any caller-local writeback job need it), plus `pull-requests: read` if the caller's own `with:`
+block ever sets `changes-filters` on a repo whose default trigger includes `pull_request` (neither
+`main.yml` consumer does today, but the called `changes` job itself requests `pull-requests: read`
+and a reusable workflow's job can never hold more permission than its caller grants — see the
+`security-scan.yml` section above for the exact `startup_failure` failure mode this avoids).
+`secrets: inherit` is required so `ci-failure-ticket`/`coverage`/`status-table` can read
+`secrets.LINEAR_API_KEY`/`secrets.CODECOV_TOKEN`/`secrets.GH_PAT`.
+
 ### rust-pr.yml
 
 The shared engine behind the three Rust repos' PR-time `pr.yml`: `changes` (paths-filter +

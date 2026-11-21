@@ -1,0 +1,325 @@
+name: Rust Main (Reusable)
+
+# Push-to-main engine for the org's Rust repos (mecha10, mecha10-api). Covers only the
+# CI-shaped jobs that are identical in spirit across callers: path-filtered change
+# detection, actionlint, coverage, a single ci-failure-ticket filer, and a generic
+# writeback-commit job (status tables, generated docs, etc. via commit-and-push-writeback).
+#
+# Deliberately does NOT own: per-service/per-arch build matrices, crates.io/image
+# publishing, version bumps, or cross-repo deploy dispatch - those are repo-specific
+# business logic and stay in the caller (see this repo's README "Reusable workflows"
+# section for the per-repo breakdown). mecha10-nodes has no main.yml at all; its
+# push-to-main engine is release.yml, which is out of scope here.
+#
+# Runs on `push`/`workflow_dispatch` only, never `pull_request` - so unlike
+# security-scan.yml, none of this workflow's jobs participate in branch-protection
+# required status checks, and the "a reusable workflow's job reports as
+# <caller-job-id> / <job-name>" renaming risk does not apply here.
+
+on:
+  workflow_call:
+    inputs:
+      enable-changes:
+        description: >-
+          Whether to run the changes job (path-filtered detection via the deps-changes
+          action). A caller with its own bespoke detect job (e.g. a fragment-file-based
+          one) should leave this false and pass its own booleans into the other jobs'
+          inputs instead.
+        type: boolean
+        default: true
+      changes-filters:
+        description: >-
+          paths-filter filters YAML block, forwarded to deps-changes' filters input.
+          Leave empty to use that action's own broad polyglot default.
+        type: string
+        default: ''
+      changes-tag-pattern:
+        description: >-
+          git describe tag pattern used to resolve a diff base on workflow_dispatch
+          (when github.event.before is unset). Forwarded verbatim to git describe
+          --match.
+        type: string
+        default: 'v*'
+      enable-actionlint:
+        description: Whether to run the actionlint job.
+        type: boolean
+        default: true
+      actionlint-version:
+        description: Pinned actionlint version, forwarded to the actionlint action.
+        type: string
+        default: '1.7.12'
+      enable-coverage:
+        description: Whether to run the coverage job.
+        type: boolean
+        default: true
+      coverage-working-directory:
+        description: >-
+          Working directory to run cargo-llvm-cov from (e.g. a single-service subpath
+          like services/api). Leave empty to run from the repo root.
+        type: string
+        default: ''
+      coverage-crate-scope:
+        description: "'workspace' or 'subset' - forwarded to rust-coverage's crate-scope input."
+        type: string
+        default: 'workspace'
+      coverage-affected-crates:
+        description: >-
+          Space-separated crate names to scope coverage to when coverage-crate-scope is
+          'subset'. Forwarded to rust-coverage's affected-crates input.
+        type: string
+        default: ''
+      coverage-flags:
+        description: Codecov flags value for this run's upload.
+        type: string
+        default: 'rust'
+      coverage-runner-label:
+        description: Runner label for the coverage job.
+        type: string
+        default: 'arc-catfood-rust'
+      minimal-runner-label:
+        description: Runner label for the lightweight jobs (changes, actionlint, ci-failure-ticket, status-table).
+        type: string
+        default: 'arc-catfood-minimal'
+      enable-status-table:
+        description: >-
+          Whether to run the status-table job - a generic writeback-commit job for a
+          caller-generated file (service status table, release status table, etc.) via
+          the commit-and-push-writeback action. Default false: most callers either don't
+          have one, or still need the per-repo update script wired in via
+          status-table-update-command.
+        type: boolean
+        default: false
+      status-table-update-command:
+        description: >-
+          Shell command (run from the repo root after checkout) that regenerates the
+          file(s) named in status-table-paths. Required when enable-status-table is true.
+          Also reused verbatim as commit-and-push-writeback's regenerate-command.
+        type: string
+        default: ''
+      status-table-paths:
+        description: Newline- or space-separated path(s) to stage and commit, forwarded to commit-and-push-writeback.
+        type: string
+        default: 'README.md'
+      status-table-commit-message:
+        description: Commit message for the writeback commit.
+        type: string
+        default: 'chore: update status table'
+      status-table-skip-commit-prefix:
+        description: >-
+          When non-empty, the status-table job skips entirely if the triggering commit's
+          message starts with this prefix - avoids re-triggering itself in a loop. Leave
+          empty to never skip (fine when the engine's own commit-message is distinctive
+          enough already).
+        type: string
+        default: ''
+      enable-ci-failure-ticket:
+        description: Whether to run the ci-failure-ticket job.
+        type: boolean
+        default: true
+      ci-failure-workflow-name:
+        description: Human-readable label passed to ci-failure-ticket, e.g. "Main".
+        type: string
+        default: 'Main'
+      ci-failure-extra-label-ids:
+        description: JSON array of additional Linear label IDs, forwarded to ci-failure-ticket.
+        type: string
+        default: '[]'
+      ci-failure-script-path:
+        description: >-
+          Escape hatch for a repo with a bespoke ticket-filing script. Path, in the
+          caller's checkout, to a script to run instead of ci-failure-ticket's bundled
+          one. Leave empty to use the bundled script.
+        type: string
+        default: ''
+      ci-failure-extra-failed:
+        description: >-
+          Caller-computed aggregate (e.g. contains(needs.*.result, 'failure') over its own
+          build/publish/deploy jobs) OR'd into this workflow's own failure check, so a
+          single ci-failure-ticket job can cover the whole run instead of each repo
+          needing a second ticket-filing job for its caller-side jobs.
+        type: boolean
+        default: false
+    secrets:
+      linear-api-key:
+        description: Forwarded to ci-failure-ticket. Required when enable-ci-failure-ticket is true.
+        required: false
+      codecov-token:
+        description: Forwarded to the coverage job's codecov/codecov-action upload. Required when enable-coverage is true.
+        required: false
+      gh-pat:
+        description: >-
+          PAT (not GITHUB_TOKEN) with Contents: read/write, forwarded to
+          commit-and-push-writeback. Required when enable-status-table is true.
+        required: false
+    outputs:
+      changes:
+        description: JSON array of changes-filters keys that matched (the changes job's own output).
+        value: ${{ jobs.changes.outputs.changes }}
+      deps:
+        description: deps-changes' own 'deps' boolean passthrough (only meaningful with the default filters).
+        value: ${{ jobs.changes.outputs.deps }}
+      base:
+        description: Resolved diff base (github.event.before, or the last matching tag, or HEAD~1).
+        value: ${{ jobs.changes.outputs.base }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: changes
+    if: inputs.enable-changes
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changes: ${{ steps.filter.outputs.changes }}
+      deps: ${{ steps.filter.outputs.deps }}
+      base: ${{ steps.diff_base.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve diff base
+        id: diff_base
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            LAST_TAG=$(git describe --tags --match "${{ inputs.changes-tag-pattern }}" --abbrev=0 2>/dev/null || echo "")
+            echo "base=${LAST_TAG:-HEAD~1}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: filter
+        if: inputs.changes-filters == ''
+        uses: mecha-industries/mecha10-actions/.github/actions/deps-changes@main
+
+      - id: filter-custom
+        if: inputs.changes-filters != ''
+        uses: mecha-industries/mecha10-actions/.github/actions/deps-changes@main
+        with:
+          filters: ${{ inputs.changes-filters }}
+
+  actionlint:
+    name: actionlint
+    if: inputs.enable-actionlint
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: lint
+        uses: mecha-industries/mecha10-actions/.github/actions/actionlint@main
+        with:
+          actionlint-version: ${{ inputs.actionlint-version }}
+
+      - name: Fail on actionlint findings
+        if: steps.lint.outputs.outcome == 'failure'
+        shell: bash
+        run: exit 1
+
+  coverage:
+    name: coverage
+    needs: changes
+    if: always() && inputs.enable-coverage
+    runs-on: ${{ inputs.coverage-runner-label }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.coverage-working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage@main
+        id: coverage
+        with:
+          crate-scope: ${{ inputs.coverage-crate-scope }}
+          affected-crates: ${{ inputs.coverage-affected-crates }}
+
+      - name: Upload coverage to Codecov
+        if: always() && steps.coverage.outcome == 'success'
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.codecov-token }}
+          file: ${{ inputs.coverage-working-directory != '' && format('{0}/lcov.info', inputs.coverage-working-directory) || 'lcov.info' }}
+          flags: ${{ inputs.coverage-flags }}
+          fail_ci_if_error: false
+
+  status-table:
+    name: status-table
+    if: >-
+      always() && inputs.enable-status-table &&
+      (inputs.status-table-skip-commit-prefix == '' ||
+       !startsWith(github.event.head_commit.message, inputs.status-table-skip-commit-prefix))
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: rust-main-status-table-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Verify gh-pat is configured
+        shell: bash
+        env:
+          GH_PAT: ${{ secrets.gh-pat }}
+        run: |
+          set -o pipefail
+          if [ -z "$GH_PAT" ]; then
+            echo "::error::secrets.gh-pat is not set. status-table needs a real PAT (not GITHUB_TOKEN) to push directly to main." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.gh-pat }}
+
+      - name: Sync with latest default branch before generating
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.gh-pat }}
+        run: |
+          set -o pipefail
+          git fetch origin
+          git rebase "origin/${{ github.ref_name }}"
+
+      - name: Regenerate status content
+        shell: bash
+        run: ${{ inputs.status-table-update-command }}
+
+      - uses: mecha-industries/mecha10-actions/.github/actions/commit-and-push-writeback@main
+        with:
+          gh-pat: ${{ secrets.gh-pat }}
+          paths: ${{ inputs.status-table-paths }}
+          commit-message: ${{ inputs.status-table-commit-message }}
+          target-branch: ${{ github.ref_name }}
+          retry-mode: regenerate
+          regenerate-command: ${{ inputs.status-table-update-command }}
+
+  ci-failure-ticket:
+    name: ci-failure-ticket
+    needs: [changes, actionlint, coverage]
+    if: >-
+      always() && inputs.enable-ci-failure-ticket &&
+      (contains(needs.*.result, 'failure') || inputs.ci-failure-extra-failed)
+    runs-on: ${{ inputs.minimal-runner-label }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/ci-failure-ticket@main
+        with:
+          workflow-name: ${{ inputs.ci-failure-workflow-name }}
+          linear-api-key: ${{ secrets.linear-api-key }}
+          extra-label-ids: ${{ inputs.ci-failure-extra-label-ids }}
+          script-path: ${{ inputs.ci-failure-script-path }}
