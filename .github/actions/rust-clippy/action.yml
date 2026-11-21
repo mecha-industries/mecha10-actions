@@ -1,0 +1,172 @@
+name: Rust clippy
+description: >
+  Shared step body for the duplicated `clippy` jobs in
+  mecha-industries/mecha10, mecha-industries/mecha10-api, and
+  mecha-industries/mecha10-nodes' pr.yml workflows: install a stable
+  toolchain with the clippy component via this repo's own setup-rust
+  action, run `cargo clippy -- -D warnings` (optionally scoped to a crate
+  subset via the crate-scope/affected-crates contract those repos' own
+  changes/detect jobs compute, optionally wrapped in the calling repo's own
+  scripts/ci/cargo-with-sccache-fallback.sh), and capture the step's
+  outcome plus a text report as this action's outputs. Unlike cargo fmt,
+  cargo clippy does support --workspace, which this action passes when not
+  scoped to a subset.
+
+  This action deliberately does NOT run actions/checkout - like this repo's
+  trivy-scan action, it runs mid-job after the calling job has already
+  checked out the repository, and a second checkout here would clobber
+  whatever earlier steps already produced in the workspace. It also does
+  NOT set up any build cache (actions/cache, mozilla-actions/sccache-action)
+  or install system build dependencies (libudev-dev, mold/clang) - those
+  vary materially across the three source jobs (e.g. mecha10-nodes installs
+  libudev-dev and a mold/clang fast linker that the other two don't need)
+  rather than being duplicated bodies, so callers keep doing that setup
+  themselves before calling this action, same as setup-rust itself doesn't
+  restore deps.
+
+  job-level concerns that stay with the caller and CANNOT move into this
+  composite action: needs/if gating (mecha10 gates on
+  needs.changes.outputs.rust, mecha10-api gates on
+  needs.detect.outputs.api, mecha10-nodes has no gate at all - note
+  mecha10's real clippy job is also split into a clippy-plan/clippy-shard
+  matrix plus a thin clippy aggregator job for sharding; this action covers
+  the single `cargo clippy` step body common to every shard/call site, not
+  the sharding/matrix machinery itself), runs-on (arc-mecha10 for mecha10,
+  arc-catfood-rust for mecha10-api/mecha10-nodes), timeout-minutes (observed
+  10/15/20 across the three, 30 for mecha10's own clippy-shard), permissions
+  (mecha10 and mecha10-api grant pull-requests: write to post report
+  comments downstream, mecha10-nodes grants only contents: read), and the
+  job's own outputs: block re-exporting this action's outputs.
+
+  The cargo clippy step below always runs with continue-on-error: true and
+  always captures its outcome/report, so this action never fails the
+  containing job by itself - a caller that wants a hard gate (as all three
+  source repos do today) adds its own
+  `if: steps.<this-action-step-id>.outputs.outcome == 'failure'` ->
+  `run: exit 1` step after calling this action, same as mecha10/mecha10-api's
+  existing clippy jobs already do today for their own scan step.
+
+inputs:
+  crate-scope:
+    description: >
+      Either "workspace" (lint every crate, the default -
+      cargo clippy --workspace) or "subset" (lint only the crates listed in
+      affected-crates, via repeated -p <crate> flags). Mirrors the
+      crate-scope output of the calling repo's own changes/detect job -
+      pass "subset" only when that job has determined it's a genuine, safe
+      strict subset of the workspace; any other case (no PR base, an
+      unmapped changed path, or any uncertainty) should stay "workspace",
+      the same full-clippy fallback behavior these jobs have always used.
+    required: false
+    default: 'workspace'
+  affected-crates:
+    description: >
+      Space-separated list of crate names to lint, e.g. "crate-a crate-b".
+      Only consulted when crate-scope is "subset".
+    required: false
+    default: ''
+  working-directory:
+    description: >
+      Directory (relative to the repo root) to run cargo clippy in.
+      Defaults to the repo root. mecha10-api's clippy job scopes this to
+      services/api since that repo hosts multiple independently-deployable
+      services under one checkout.
+    required: false
+    default: '.'
+  cargo-profile-dev-debug:
+    description: >
+      Value to export as CARGO_PROFILE_DEV_DEBUG for the cargo clippy step,
+      or empty to leave the workspace's own [profile.dev] debug setting
+      untouched. cargo clippy only compiles+lints via clippy-driver and
+      never executes a test binary, so the workspace's debug=1 line-info
+      (kept at the workspace level for readable panic backtraces in jobs
+      that actually run compiled code) is pure waste in this job
+      specifically - mecha10 and mecha10-api both override it to "0" here
+      for that reason. mecha10-nodes does not set this at all (lower-
+      traffic repo, never carried the override). Defaults to "0" since
+      that's the behavior shared by two of the three current call sites;
+      mecha10-nodes callers can reproduce their current behavior by
+      passing an empty string.
+    required: false
+    default: '0'
+  omit-report-on-success:
+    description: >
+      When "true" (the default), a passing run's report output is replaced
+      with a short placeholder instead of the full (empty) clippy output,
+      to stay under GitHub's combined 1MB job-outputs cap - mecha10's
+      clippy aggregator job does this today across its shards. Set to
+      "false" to always include the report file's contents verbatim when
+      present, matching mecha10-api's and mecha10-nodes' clippy jobs, which
+      do not special-case a passing outcome.
+    required: false
+    default: 'true'
+  sccache-fallback-script:
+    description: >
+      Path (relative to working-directory) to the calling repo's own
+      scripts/ci/cargo-with-sccache-fallback.sh, which wraps the cargo
+      clippy invocation to use sccache when available. All three source
+      repos keep this script locally rather than in this shared repo,
+      since it's tied to each repo's own sccache cache-mode setup. Leave
+      empty to run cargo clippy directly with no wrapper.
+    required: false
+    default: 'scripts/ci/cargo-with-sccache-fallback.sh'
+
+outputs:
+  outcome:
+    description: success or failure - the cargo clippy step's own outcome.
+    value: ${{ steps.scan.outcome }}
+  report:
+    description: Contents of the cargo clippy report (or a placeholder).
+    value: ${{ steps.report.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+      with:
+        components: clippy
+        enable-rust-cache: false
+
+    - id: scan
+      name: cargo clippy
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -o pipefail
+        if [ -n "${{ inputs.cargo-profile-dev-debug }}" ]; then
+          export CARGO_PROFILE_DEV_DEBUG="${{ inputs.cargo-profile-dev-debug }}"
+        fi
+        SCOPE_ARGS=(--workspace)
+        if [ "${{ inputs.crate-scope }}" = "subset" ]; then
+          SCOPE_ARGS=()
+          for c in ${{ inputs.affected-crates }}; do
+            SCOPE_ARGS+=(-p "$c")
+          done
+        fi
+        RUNNER=(cargo clippy)
+        if [ -n "${{ inputs.sccache-fallback-script }}" ] && [ -f "${{ inputs.sccache-fallback-script }}" ]; then
+          chmod +x "${{ inputs.sccache-fallback-script }}"
+          RUNNER=("${{ inputs.sccache-fallback-script }}" cargo clippy)
+        fi
+        "${RUNNER[@]}" "${SCOPE_ARGS[@]}" -- -D warnings 2>&1 | tee clippy-report.txt
+
+    - name: Capture report
+      id: report
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -uo pipefail
+        {
+          echo "report<<CLIPPY_REPORT_EOF"
+          if [ "${{ inputs.omit-report-on-success }}" = "true" ] && [ "${{ steps.scan.outcome }}" != "failure" ]; then
+            echo "(clippy passed — full report omitted to stay under GitHub's 1MB job-outputs cap)"
+          elif [ -f clippy-report.txt ]; then
+            cat clippy-report.txt
+            echo
+          else
+            echo "(no report written — see this job's own log)"
+          fi
+          echo "CLIPPY_REPORT_EOF"
+        } >> "$GITHUB_OUTPUT"
