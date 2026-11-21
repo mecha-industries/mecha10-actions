@@ -11,7 +11,11 @@ inputs:
     required: false
     default: '3.12'
   cache-prefix:
-    description: Cache key prefix for astral-sh/setup-uv (use "main" for the main branch).
+    description: >
+      Cache key disambiguator for astral-sh/setup-uv (use "main" for the main branch). Passed
+      through as astral-sh/setup-uv's own cache-suffix input - upstream appends it to the cache
+      key rather than prefixing it, but this input keeps its original name since existing callers
+      already pass it. Leave unset/empty to use astral-sh/setup-uv's default cache key.
     required: false
     default: ''
 
@@ -27,3 +31,4 @@ runs:
       uses: astral-sh/setup-uv@v5
       with:
         enable-cache: true
+        cache-suffix: ${{ inputs.cache-prefix }}
