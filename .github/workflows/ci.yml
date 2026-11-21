@@ -30,3 +30,9 @@ jobs:
           set -o pipefail
           chmod +x .github/actions/notify-slack/scripts/notify-release-slack.test.sh
           .github/actions/notify-slack/scripts/notify-release-slack.test.sh
+      - name: Run ci-failure-ticket script tests
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x .github/actions/ci-failure-ticket/scripts/file-ci-failure-ticket.test.sh
+          .github/actions/ci-failure-ticket/scripts/file-ci-failure-ticket.test.sh
