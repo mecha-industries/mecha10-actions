@@ -1,0 +1,60 @@
+name: Setup Rust
+description: >
+  Installs a stable Rust toolchain (dtolnay/rust-toolchain) with optional components, optionally
+  installs the libudev-dev system dependency some crates need to build, and optionally caches the
+  toolchain and dependency build artifacts with Swatinem/rust-cache. Hoisted from
+  mecha-industries/mecha10's local .github/actions/setup-rust action to replace the dtolnay/
+  rust-toolchain call sites hand-rolled across mecha-industries repos' pr.yml files. Like this
+  repo's trivy-scan action, this action does NOT run actions/checkout itself - it runs mid-job
+  after the calling job has already checked out the repository, and a second checkout here would
+  clobber whatever the caller's earlier steps already produced in the workspace.
+
+inputs:
+  components:
+    description: 'Rust components to install (comma-separated, e.g. rustfmt, clippy, llvm-tools-preview). Leave empty to install no extra components.'
+    required: false
+    default: ''
+  install-libudev:
+    description: >
+      Install the libudev-dev system package before the toolchain step. Some crates (e.g. ones
+      using the udev/serial-enumeration stack for hardware device discovery) fail to build
+      without libudev's headers/shared library present, so this is a real build dependency for
+      those crates, not an optional extra. Leave false for crates that don't need it.
+    required: false
+    default: 'false'
+  enable-rust-cache:
+    description: >
+      Run Swatinem/rust-cache after installing the toolchain. Set to false for callers that
+      already manage their own build cache (e.g. via mozilla-actions/sccache-action), since
+      running both against the same job would duplicate caching work for no benefit.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      if: inputs.install-libudev == 'true'
+      shell: bash
+      run: |
+        set -o pipefail
+        if [ "$(id -u)" -eq 0 ]; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends libudev-dev
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libudev-dev
+        else
+          echo "::error::Need to install libudev-dev and no sudo available to do so" >&2
+          exit 1
+        fi
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    - name: Cache Rust dependencies
+      if: inputs.enable-rust-cache == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ runner.os }}-rust-cache
+        cache-on-failure: true
