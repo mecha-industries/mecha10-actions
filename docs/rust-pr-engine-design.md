@@ -297,3 +297,27 @@ that classification must never change.
   `cargo-mutants`) and leaves the *large*, *expensive-to-maintain* jobs caller-side everywhere —
   which is the opposite of where a reusable-workflow investment pays off. mecha10-nodes is the one
   repo where "most of the file is the shared shape" is actually true today.
+
+## 7. Removed: rust-main.yml
+
+`rust-main.yml`, a speculative shared push-to-main engine covering only the CI-shaped jobs common
+to mecha10's and mecha10-api's `main.yml` (`changes`, `actionlint`, `coverage`,
+`ci-failure-ticket`, an optional `status-table` writeback), was built on `fc1f322` but never
+adopted by either repo — zero `uses:` references to it exist in any mecha-industries repo as of
+this writing. It was deleted rather than kept speculatively available, for three reasons:
+
+- The same analysis as above applies on the main-branch side: mecha10's own repo-specific jobs
+  (`hakari`, `config-lint`, `quality-check`, `unused-pub`, `ignored-tests`, `dependency-audit`)
+  and mecha10-api's per-service Docker/deploy jobs dominate both `main.yml` files far more than
+  anything genuinely shared — the §6 recommendation against adopting a shared engine for
+  mecha10/mecha10-api's *PR*-time CI applies at least as strongly to their *push-to-main* CI,
+  which was `rust-main.yml`'s only plausible consumer pair.
+- An unconsumed reusable workflow is not inert: it is untested code that still carries the
+  required-check naming trap described in the README's "⚠️ Required-check naming" section (a job
+  inside a called reusable workflow reports as `<caller-job-id> / <job-name>`, which silently
+  breaks any branch-protection rule expecting the bare name). Dead shared CI code hides defects
+  like this until the moment something finally adopts it — the same way `labone-actions`'
+  `fail-if-required-failed` sat unused long enough for an invalid-`needs`-context bug to go
+  unnoticed until adoption broke four PRs at once.
+- `rust-pr.yml` is unaffected by this removal — it has a real consumer (mecha10-nodes' `pr.yml`,
+  637 → 113 lines) and stays in place.
