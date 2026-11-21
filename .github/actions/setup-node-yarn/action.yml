@@ -1,0 +1,161 @@
+name: Setup Node.js + Yarn
+description: >
+  Checkout, enable Corepack, setup Node.js from package.json, restore the
+  Yarn cache, restore a node_modules cache keyed on yarn.lock (skipping
+  `yarn install --frozen-lockfile` entirely on a hit — see `cache-write`
+  input), running the install locally in every job that needs deps rather
+  than installing once and fanning the result out via a GitHub Actions
+  artifact. A cache entry keyed on yarn.lock's hash (not the run id) is
+  naturally deduped across runs and jobs, and only churns when the lockfile
+  itself changes. This action checks out the repository itself.
+
+inputs:
+  cache-key-prefix:
+    description: >
+      Job/purpose identifier (e.g. 'setup', 'lint', 'test', 'dead-code')
+      folded into the Yarn download-cache key so a job only ever
+      restores/writes the Yarn cache entry it itself created. Deliberately
+      NOT folded into the node_modules cache key below (see that step's
+      comment) - node_modules is fully determined by yarn.lock (plus any
+      extra-cache-key-glob inputs), not by which script a job happens to
+      run, so every job sharing those same hash inputs shares one
+      node_modules entry instead of each paying for its own redundant
+      `yarn install --frozen-lockfile`.
+    required: true
+  working-directory:
+    description: >
+      Directory (relative to the repo root) the app lives in. Defaults to
+      `.` (repo root).
+    required: false
+    default: '.'
+  extra-paths:
+    description: >
+      Newline- or space-separated list of additional paths (relative to the
+      repo root) to fold into the node_modules cache entry, beyond
+      node_modules and .next/cache.
+    required: false
+    default: ''
+  extra-cache-key-glob-1:
+    description: >
+      Extra glob pattern (relative to working-directory) folded into the
+      node_modules cache key's hashFiles alongside yarn.lock.
+    required: false
+    default: ''
+  extra-cache-key-glob-2:
+    description: Second extra glob pattern - see extra-cache-key-glob-1.
+    required: false
+    default: ''
+  ssh-deploy-key:
+    description: >
+      SSH private key (e.g. secrets.LAB_GIT_DEPS_SSH_KEY) for cloning
+      private git-dependency packages during yarn install. Loaded into an
+      ssh-agent before install. Leave empty (default) for repos with no
+      private git dependencies.
+    required: false
+    default: ''
+  gh-token:
+    description: >
+      GitHub token (e.g. secrets.GH_PAT) exposed as GH_TOKEN to the yarn
+      install step only — for repos whose `postinstall` script shells out
+      to the `gh` CLI against a different private repo. Leave empty
+      (default) for repos with no such cross-repo `gh` calls.
+    required: false
+    default: ''
+  cache-write:
+    description: >
+      Whether the node_modules cache below should be allowed to write a new
+      cache entry ('true') or only read an existing one ('false',
+      read-only). Only the push-to-main workflow's `setup` job needs to
+      write — every other job, on both PR and main runs, reads that same
+      entry read-only via restore-keys instead of also paying to write a
+      duplicate copy, which just churns/evicts the shared cache. 'false'
+      (read-only) by default. String, not boolean — composite action inputs
+      are always strings.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+
+    - name: Enable Corepack
+      shell: bash
+      run: corepack enable
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version-file: '${{ inputs.working-directory }}/package.json'
+
+    - name: Cache Yarn cache
+      uses: actions/cache@v6
+      with:
+        path: |
+          ${{ inputs.working-directory }}/.yarn/cache
+          ${{ inputs.working-directory }}/.yarn/install-state.gz
+        key: ${{ runner.os }}-yarn-${{ inputs.cache-key-prefix }}-${{ hashFiles(format('{0}/yarn.lock', inputs.working-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-yarn-${{ inputs.cache-key-prefix }}-
+
+    - name: Compute node_modules cache paths
+      id: cache-paths
+      shell: bash
+      run: |
+        set -o pipefail
+        {
+          echo "paths<<CACHE_PATHS_EOF"
+          echo "${{ inputs.working-directory }}/node_modules"
+          echo "${{ inputs.working-directory }}/.next/cache"
+          for p in ${{ inputs.extra-paths }}; do
+            echo "${{ inputs.working-directory }}/$p"
+          done
+          echo "CACHE_PATHS_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Cache node_modules
+      id: node-modules-cache
+      if: inputs.cache-write == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.cache-paths.outputs.paths }}
+        key: ${{ runner.os }}-node-modules-${{ hashFiles(format('{0}/yarn.lock', inputs.working-directory), (inputs.extra-cache-key-glob-1 != '' && format('{0}/{1}', inputs.working-directory, inputs.extra-cache-key-glob-1)) || '', (inputs.extra-cache-key-glob-2 != '' && format('{0}/{1}', inputs.working-directory, inputs.extra-cache-key-glob-2)) || '') }}
+        restore-keys: |
+          ${{ runner.os }}-node-modules-
+
+    - name: Restore node_modules (read-only)
+      id: node-modules-restore
+      if: inputs.cache-write != 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.cache-paths.outputs.paths }}
+        key: ${{ runner.os }}-node-modules-${{ hashFiles(format('{0}/yarn.lock', inputs.working-directory), (inputs.extra-cache-key-glob-1 != '' && format('{0}/{1}', inputs.working-directory, inputs.extra-cache-key-glob-1)) || '', (inputs.extra-cache-key-glob-2 != '' && format('{0}/{1}', inputs.working-directory, inputs.extra-cache-key-glob-2)) || '') }}
+        restore-keys: |
+          ${{ runner.os }}-node-modules-
+
+    - name: Load SSH deploy key for private git dependencies
+      if: inputs.ssh-deploy-key != ''
+      uses: webfactory/ssh-agent@v0.9.1
+      with:
+        ssh-private-key: ${{ inputs.ssh-deploy-key }}
+
+    - name: Trust github.com host key
+      if: inputs.ssh-deploy-key != ''
+      shell: bash
+      run: ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts
+
+    - name: Route git+https git dependencies over SSH
+      if: inputs.ssh-deploy-key != ''
+      shell: bash
+      run: git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
+
+    - name: Install dependencies
+      if: |
+        (steps.node-modules-cache.outputs.cache-hit != 'true' &&
+         steps.node-modules-restore.outputs.cache-hit != 'true') ||
+        inputs.extra-paths != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        YARN_NETWORK_CONCURRENCY: '4'
+      run: yarn install --frozen-lockfile
