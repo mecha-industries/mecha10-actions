@@ -36,3 +36,17 @@ jobs:
           set -o pipefail
           chmod +x .github/actions/ci-failure-ticket/scripts/file-ci-failure-ticket.test.sh
           .github/actions/ci-failure-ticket/scripts/file-ci-failure-ticket.test.sh
+      - name: Run rust-coverage sccache script tests
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x .github/actions/rust-coverage/scripts/setup-sccache-cache-mode.test.sh
+          .github/actions/rust-coverage/scripts/setup-sccache-cache-mode.test.sh
+          chmod +x .github/actions/rust-coverage/scripts/cargo-with-sccache-fallback.test.sh
+          .github/actions/rust-coverage/scripts/cargo-with-sccache-fallback.test.sh
+      - name: Run rust-clippy sccache script tests
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x .github/actions/rust-clippy/scripts/cargo-with-sccache-fallback.test.sh
+          .github/actions/rust-clippy/scripts/cargo-with-sccache-fallback.test.sh
