@@ -1,0 +1,139 @@
+name: Rust coverage (cargo-llvm-cov)
+description: >
+  Runs cargo-llvm-cov over the (optionally crate-scoped) workspace, uploads lcov.info plus a
+  human-readable per-file summary as a build artifact, and appends that summary to the job's
+  step summary. No coverage threshold is enforced here - the calling job decides whether to
+  fail on a broken instrumented build/test run. Hoisted from mecha-industries/mecha10's local
+  .github/actions/rust-coverage action. Like this repo's setup-rust action, this action does
+  NOT run actions/checkout itself - the source action didn't either, and it expects to run
+  mid-job after the calling job has already checked out the repository and installed whatever
+  toolchain it needs. This hoist deliberately keeps its own dtolnay/rust-toolchain + caching
+  steps rather than delegating to this repo's setup-rust action, to avoid a cross-PR ordering
+  dependency between the two hoists; a follow-up can factor this action's toolchain setup onto
+  setup-rust once both have landed and settled. The sccache cache-mode and cargo-fallback
+  scripts referenced below are repo-specific helper scripts that lived in mecha10's own
+  scripts/ci/ directory - callers outside mecha10 must either carry equivalent scripts at the
+  default paths or override the two script-path inputs to point at their own equivalents.
+
+inputs:
+  crate-scope:
+    description: >
+      'workspace' (run across the whole workspace) or 'subset' (narrow to affected-crates
+      below).
+    required: true
+  affected-crates:
+    description: >
+      Space-separated crate names to scope to when crate-scope is 'subset'. Ignored (falls
+      back to --workspace) for any other value.
+    required: false
+    default: ''
+  sccache-cache-mode-script:
+    description: >
+      Path to the repo's own script that decides sccache's cache directory/mode and exports
+      SCCACHE_DIR via GITHUB_ENV. Repo-specific - override if the caller's repo keeps this
+      script somewhere other than mecha10's own path, or has no equivalent.
+    required: false
+    default: 'scripts/ci/setup-sccache-cache-mode.sh'
+  cargo-fallback-script:
+    description: >
+      Path to the repo's own script that runs a cargo command with sccache as RUSTC_WRAPPER
+      and retries on cache-related failures. Repo-specific - override if the caller's repo
+      keeps this script somewhere other than mecha10's own path, or has no equivalent.
+    required: false
+    default: 'scripts/ci/cargo-with-sccache-fallback.sh'
+
+runs:
+  using: composite
+  steps:
+    - name: Install stable Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Install libudev-dev
+      shell: bash
+      run: |
+        set -o pipefail
+        if [ "$(id -u)" -eq 0 ]; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends libudev-dev
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libudev-dev
+        else
+          echo "::error::Need to install libudev-dev and no sudo available to do so" >&2
+          exit 1
+        fi
+
+    - name: Cache cargo-llvm-cov binary
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-llvm-cov
+        key: ${{ runner.os }}-cargo-llvm-cov-0.9.1
+
+    - name: Install cargo-llvm-cov
+      shell: bash
+      run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version 0.9.1
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-coverage-
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.5
+
+    - name: Configure sccache cache mode
+      shell: bash
+      env:
+        SCCACHE_CACHE_MODE_SCRIPT: ${{ inputs.sccache-cache-mode-script }}
+      run: bash "$SCCACHE_CACHE_MODE_SCRIPT"
+
+    - id: coverage
+      shell: bash
+      env:
+        CRATE_SCOPE: ${{ inputs.crate-scope }}
+        AFFECTED_CRATES: ${{ inputs.affected-crates }}
+        CARGO_FALLBACK_SCRIPT: ${{ inputs.cargo-fallback-script }}
+      run: |
+        set -o pipefail
+        SCOPE_ARGS=(--workspace)
+        if [ "$CRATE_SCOPE" = "subset" ]; then
+          SCOPE_ARGS=()
+          for c in $AFFECTED_CRATES; do
+            SCOPE_ARGS+=(-p "$c")
+          done
+        fi
+        bash "$CARGO_FALLBACK_SCRIPT" cargo llvm-cov "${SCOPE_ARGS[@]}" --lcov --output-path lcov.info
+        cargo llvm-cov report "${SCOPE_ARGS[@]}" 2>&1 | tee coverage-report.txt
+
+    - name: Upload coverage report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: |
+          coverage-report.txt
+          lcov.info
+        if-no-files-found: ignore
+        retention-days: 14
+
+    - name: Write job summary
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo '## Rust coverage (cargo-llvm-cov)'
+          echo
+          echo '```'
+          if [ -f coverage-report.txt ]; then
+            cat coverage-report.txt
+          else
+            echo '(no report written - see the coverage job own log)'
+          fi
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
