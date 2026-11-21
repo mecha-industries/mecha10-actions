@@ -14,6 +14,10 @@ inputs:
     description: 'Rust components to install (comma-separated, e.g. rustfmt, clippy, llvm-tools-preview). Leave empty to install no extra components.'
     required: false
     default: ''
+  targets:
+    description: 'Target triples to install for the toolchain, for cross-compilation (comma or whitespace separated, e.g. aarch64-unknown-linux-gnu). Leave empty to install only the host target.'
+    required: false
+    default: ''
   install-libudev:
     description: >
       Install the libudev-dev system package before the toolchain step. Some crates (e.g. ones
@@ -99,6 +103,7 @@ runs:
       uses: dtolnay/rust-toolchain@stable
       with:
         components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
 
     - name: Cache Rust dependencies
       if: inputs.enable-rust-cache == 'true'
