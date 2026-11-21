@@ -1,0 +1,91 @@
+name: Notify Slack
+description: >
+  Posts one grouped Slack message summarizing every unit released in a run (unit name,
+  version, and release-notes URL). Centralizes the notify-release-slack.sh script
+  duplicated byte-for-byte (comments aside) across mecha10-nodes, mecha10-assets, and
+  mecha10-dashboard's slack-notification jobs. The caller still owns the job-level
+  `needs:`/`if:` gating and builds units-json from its own release job's outputs - a
+  composite action cannot contribute to another job's `needs:` graph. This action does
+  NOT run actions/checkout: posting a Slack message needs no file from the caller's
+  repository tree, only the inputs below.
+
+inputs:
+  units-json:
+    description: >
+      JSON array of {unit, version, release_url} objects, one per unit released this run.
+      An empty array ([]) is a valid, expected input for "nothing released this run" - the
+      action exits without posting instead of sending a confusing empty message.
+    required: true
+  slack-bot-token:
+    description: >
+      Slack bot token for chat.postMessage; the caller passes its secrets.SLACK_BOT_TOKEN.
+      Empty is treated as "notifications not configured for this run" (e.g. a fork PR with
+      no repo secrets) and skips with a log line, not a failure - matching all three
+      source jobs' existing behavior for this exact case.
+    required: false
+    default: ""
+  slack-channel:
+    description: >
+      Slack channel ID or name to post to; the caller passes whichever secret or repo
+      variable it stores its release channel under. Falls back to the literal #release
+      when empty.
+    required: false
+    default: ""
+  slack-api-url:
+    description: Override for the Slack chat.postMessage endpoint, for testing.
+    required: false
+    default: "https://slack.com/api/chat.postMessage"
+
+runs:
+  using: composite
+  steps:
+    - name: Notify Slack of release units
+      shell: bash
+      env:
+        UNITS_JSON: ${{ inputs.units-json }}
+        SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}
+        SLACK_CHANNEL: ${{ inputs.slack-channel }}
+        SLACK_API_URL: ${{ inputs.slack-api-url }}
+      run: |
+        set -uo pipefail
+
+        if ! echo "$UNITS_JSON" | jq -e . >/dev/null 2>&1; then
+          echo "::error::units-json is not valid JSON: $UNITS_JSON"
+          exit 1
+        fi
+
+        count="$(echo "$UNITS_JSON" | jq 'if type == "array" then length else -1 end' 2>/dev/null)"
+        if [ "$count" -le 0 ]; then
+          echo "No units released this run - skipping Slack notification"
+          exit 0
+        fi
+
+        if [ -z "$SLACK_BOT_TOKEN" ]; then
+          echo "slack-bot-token is empty - skipping Slack notification"
+          exit 0
+        fi
+
+        channel="${SLACK_CHANNEL:-#release}"
+
+        if [ "$count" -eq 1 ]; then
+          header=":rocket: *1 unit released:*"
+        else
+          header=":rocket: *${count} units released:*"
+        fi
+        bullets="$(echo "$UNITS_JSON" | jq -r '.[] | "• <\(.release_url)|\(.unit) v\(.version)>"')"
+        text="$(printf '%s\n%s' "$header" "$bullets")"
+
+        payload="$(jq -n --arg channel "$channel" --arg text "$text" '{channel: $channel, text: $text}')"
+
+        response="$(curl -sS -X POST "$SLACK_API_URL" \
+          -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+          -H "Content-Type: application/json; charset=utf-8" \
+          -d "$payload")"
+
+        ok="$(echo "$response" | jq -r '.ok // false' 2>/dev/null)"
+        if [ "$ok" != "true" ]; then
+          echo "::error::Slack chat.postMessage failed: $response"
+          exit 1
+        fi
+
+        echo "Posted Slack notification for ${count} unit(s) to ${channel}"
