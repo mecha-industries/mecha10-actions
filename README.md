@@ -26,6 +26,13 @@ version bump lands once, not once per repo.
 | `.github/actions/deps-changes/` | Runs `dorny/paths-filter` to detect dependency-manifest changes — replaces the `changes` job body duplicated across consuming repos' `security.yml` files. |
 | `.github/actions/file-linear-tickets/` | Files a deduped Linear ticket for every failed entry in a JSON report file, from a single job instead of one ticket-filing step per scan job — hoisted from mecha10/mecha10-api/mecha10-dashboard. |
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
+| `.github/actions/cached-script/` | Restores Node/Yarn deps via the sibling `setup-node-yarn` action and runs a cached `yarn <script>` (lint/typecheck/build/test), with an optional script-specific incremental cache layered on top. |
+| `.github/actions/rust-coverage/` | Runs `cargo-llvm-cov` over the workspace (or an affected-crate subset), uploads the lcov + text report, and appends it to the job summary — expects the caller to have already checked out the repo and installed a Rust toolchain. |
+| `.github/actions/scan-with-report/` | Runs a yarn report-producing scan script (design-system, dead-code, etc.), posts/updates a sticky PR comment via `danger-js`, and exposes `outcome`/`report`/`groups` outputs. |
+| `.github/actions/setup-node-yarn/` | Checks out the repo, enables Corepack, sets up Node from `package.json`, and restores the Yarn + `node_modules` caches keyed on `yarn.lock`. |
+| `.github/actions/setup-python-uv/` | Installs Python and `uv` (with `astral-sh/setup-uv` caching) — expects the caller to have already checked out the repo. |
+| `.github/actions/setup-rust/` | Installs a stable Rust toolchain via `dtolnay/rust-toolchain`, optionally installs `libudev-dev`, and optionally runs `Swatinem/rust-cache` — expects the caller to have already checked out the repo. |
+| `.github/actions/web-changes/` | Checks out the repo and runs `dorny/paths-filter` to expose a fixed set of web/Next.js path-change outputs (`react_ui`, `web_source`, `web_deps`, `image`, `any`, etc.). |
 
 ## Usage
 
@@ -255,6 +262,203 @@ action cannot contribute to another job's `needs:` graph or declare job-level
 including an `if:` that skips runs whose own commit message matches `commit-message` above (so
 this job's writeback commit doesn't retrigger itself).
 
+### setup-node-yarn
+
+```yaml
+steps:
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-node-yarn@main
+    with:
+      cache-key-prefix: lint
+      cache-write: ${{ github.event_name == 'push' }}
+```
+
+Inputs:
+- `cache-key-prefix` (required) - job/purpose identifier (e.g. `lint`, `test`) folded into the
+  Yarn download-cache key.
+- `working-directory` (default `.`) - directory the app lives in.
+- `extra-paths` (default `''`) - extra paths folded into the `node_modules` cache entry.
+- `extra-cache-key-glob-1` / `extra-cache-key-glob-2` (default `''`) - extra glob(s) folded into
+  the `node_modules` cache key's `hashFiles` alongside `yarn.lock`.
+- `ssh-deploy-key` (default `''`) - SSH private key for cloning private git-dependency packages.
+- `gh-token` (default `''`) - GitHub token exposed as `GH_TOKEN` to the install step only.
+- `cache-write` (default `'false'`) - `'true'` to read+write the `node_modules` cache
+  (push-to-main), `'false'` to only read it (PR runs).
+
+This action **checks out the repository itself** (`actions/checkout@v7`) - callers don't add
+their own checkout step before it.
+
+### cached-script
+
+```yaml
+steps:
+  - uses: mecha-industries/mecha10-actions/.github/actions/cached-script@main
+    with:
+      deps-cache-key-prefix: lint
+      script: lint
+      cache-path: .eslintcache
+      cache-key-prefix: eslintcache
+      cache-key-extra-glob-1: .eslintrc*
+      cache-write: ${{ github.event_name == 'push' }}
+```
+
+Inputs:
+- `deps-cache-key-prefix` (required) - passed through to `setup-node-yarn`'s `cache-key-prefix`.
+- `working-directory` (default `.`).
+- `extra-paths`, `extra-deps-cache-key-glob-1`, `extra-deps-cache-key-glob-2`, `ssh-deploy-key`,
+  `gh-token` (all default `''`) - passed straight through to the matching `setup-node-yarn` input.
+- `script` (required) - `package.json` script name to run (e.g. `lint`, `typecheck`, `build`).
+- `script-args` (default `''`) - extra CLI args forwarded to the script.
+- `cache-path` (default `''`) - script-specific incremental-cache path (e.g. `.eslintcache`,
+  `tsconfig.tsbuildinfo`, `.jestcache`); empty skips this cache entirely.
+- `cache-key-prefix` (default `''`) - required whenever `cache-path` is set.
+- `cache-key-extra-glob-1` / `cache-key-extra-glob-2` (default `''`) - extra glob(s) folded into
+  this action's own script-specific cache key.
+- `cache-write` (default `'false'`) - `'true'` to read+write the script-specific cache
+  (push-to-main), `'false'` to only read it (PR runs).
+
+This action calls the sibling `setup-node-yarn` action **internally, via its full cross-repo
+path** (`mecha-industries/mecha10-actions/.github/actions/setup-node-yarn@main`) - a consumer
+gets the shared `setup-node-yarn`, not a local copy, and inherits its checkout + Yarn/
+`node_modules` caching. Don't add a separate checkout step before this action.
+
+### setup-rust
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+    with:
+      components: clippy,rustfmt
+      install-libudev: 'true'
+```
+
+Inputs:
+- `components` (default `''`) - comma-separated Rust components to install (e.g. `rustfmt,clippy`).
+- `install-libudev` (default `'false'`) - install the `libudev-dev` system package before the
+  toolchain step.
+- `enable-rust-cache` (default `'true'`) - run `Swatinem/rust-cache` after installing the toolchain.
+
+This action does **not** check out the repository itself - the caller must run
+`actions/checkout` first; a second checkout here would clobber whatever the caller's earlier
+steps already produced in the workspace. `enable-rust-cache` defaults to `true`; a caller that
+already manages its own build cache (e.g. via `mozilla-actions/sccache-action`) should pass
+`enable-rust-cache: 'false'`, or drop its own cache step, to avoid two caches competing.
+
+### rust-coverage
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+  - uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage@main
+    with:
+      crate-scope: workspace
+```
+
+Inputs:
+- `crate-scope` (required) - `workspace` (run across the whole workspace) or `subset` (narrow to
+  `affected-crates`).
+- `affected-crates` (default `''`) - space-separated crate names to scope to when `crate-scope` is
+  `subset`; ignored otherwise.
+- `sccache-cache-mode-script` (default `scripts/ci/setup-sccache-cache-mode.sh`) - repo-local
+  script that decides sccache's cache dir/mode.
+- `cargo-fallback-script` (default `scripts/ci/cargo-with-sccache-fallback.sh`) - repo-local
+  script that runs a cargo command with sccache, retrying on cache-related failures.
+
+No coverage threshold is enforced here - the calling job decides whether to fail on a broken
+instrumented build/test run. Like `setup-rust`, this action does **not** check out the
+repository itself and expects the calling job to have already checked out and installed a Rust
+toolchain. It installs its own `dtolnay/rust-toolchain` + sccache steps rather than delegating to
+`setup-rust`, to avoid a cross-PR ordering dependency between the two hoists. Callers outside
+mecha10 must either carry the two `scripts/ci/...` helper scripts at their default paths, or
+override `sccache-cache-mode-script`/`cargo-fallback-script` to point at their own equivalents.
+
+### scan-with-report
+
+```yaml
+steps:
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-node-yarn@main
+    with:
+      cache-key-prefix: design-system
+  - uses: mecha-industries/mecha10-actions/.github/actions/scan-with-report@main
+    id: scan
+    with:
+      script: design-system
+      report-file: design-system-report.md
+      sticky-header: design-system-scan
+```
+
+Inputs:
+- `script` (required) - yarn script to run, e.g. `design-system`, `dead-code`.
+- `working-directory` (default `.`).
+- `report-file` (required) - path to the markdown report the script writes.
+- `sticky-header` (required) - unique id for the `danger-js` sticky PR comment (`danger ci --id`).
+- `gh-token` (default `''`) - forwarded as `GH_TOKEN`/`GITHUB_TOKEN` to the scan script step only.
+- `blocking` (default `'true'`) - whether a scan failure fails the containing job.
+
+Outputs:
+- `outcome` - `success` or `failure`, the scan step's own outcome.
+- `report` - contents of `report-file` (or a placeholder if it wasn't written).
+- `groups` - contents of the scan's `<script>-groups.json` (derived from `report-file`), or `[]`
+  if the script never wrote one.
+
+This action does **not** check out the repository and does **not** restore deps itself - the
+caller must run its own checkout + Node/Yarn setup (e.g. `setup-node-yarn`) first, since some
+callers also need job-level settings like `permissions: pull-requests: write` that a composite
+action can't set for its caller. Unlike `actionlint`, this action fails the containing job
+**itself** by default (`blocking: 'true'`) when the scan script fails; pass `blocking: 'false'`
+for an advisory-only scan that still posts its sticky comment and exposes outputs, but never
+blocks merge.
+
+### setup-python-uv
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-python-uv@main
+    with:
+      python-version: '3.12'
+```
+
+Inputs:
+- `python-version` (default `'3.12'`) - Python version to install.
+- `cache-prefix` (default `''`) - cache key prefix for `astral-sh/setup-uv` (use `"main"` for the
+  main branch).
+
+This action does **not** check out the repository itself - it expects to run mid-job after the
+calling job has already checked out the repo.
+
+### web-changes
+
+```yaml
+jobs:
+  web-changes:
+    name: web-changes
+    runs-on: arc-catfood-minimal
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      web: ${{ steps.filter.outputs.web }}
+      any: ${{ steps.filter.outputs.any }}
+      image: ${{ steps.filter.outputs.image }}
+    steps:
+      - uses: mecha-industries/mecha10-actions/.github/actions/web-changes@main
+        id: filter
+```
+
+No inputs. Outputs (all from `dorny/paths-filter`, passed straight through): `workflows`,
+`react_ui`, `web_source`, `web_deps`, `tsconfig`, `eslint_config`, `jest_config`, `web`,
+`ls_lint`, `any`, `image`.
+
+This action **checks out the repository itself**. Like `deps-changes`, it uses
+`dorny/paths-filter`, so on `pull_request` events the caller's job must declare
+`permissions: { contents: read, pull-requests: read }`, and a composite action can't contribute
+to another job's `needs:` graph or declare job-level `outputs:` - so the caller's job must
+re-export whichever of this action's outputs it needs via its own `outputs:` mapping, as shown
+above.
+
 ## Reusable workflows
 
 Unlike the composite actions above (one `with:` call per step), a reusable workflow is invoked
@@ -370,7 +574,17 @@ mecha10-nodes, user-tools) needs no aggregator job and can simply leave
 ## Adding more shared actions
 
 Each new shared piece gets its own directory under `.github/actions/<name>/` with an
-`action.yml` (composite action) and a short README section here. Candidates already identified
+`action.yml` (composite action) and a short README section here.
+
+Two authoring traps have already bitten this repo - avoid repeating them:
+- `needs` is **not** a valid context inside a composite action. A required-checks aggregator
+  cannot be a composite action; it must stay an inline job-level step (see the `required-checks`
+  job above). An action referencing `needs` fails to load entirely.
+- Never put a `${{ ... }}` expression inside a composite action's `description:` string, not even
+  as a usage example. GitHub evaluates `description:` at manifest-load time, and the action fails
+  to load with "Unrecognized named-value". Write env-var form or plain prose there instead.
+
+Candidates already identified
 but not yet extracted (see mecha10-development's CI audit, 2026-11):
 - The `libudev-dev`/`clang`/`mold` apt-install pattern repeated across several repos' Rust jobs
   (lower priority once baked into each repo's own dedicated runner image, as mecha10's was).
