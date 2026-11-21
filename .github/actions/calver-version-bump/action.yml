@@ -1,0 +1,120 @@
+name: CalVer version bump
+description: >
+  Decides whether a CalVer bump is due and, if so, computes the next version and runs the
+  repo's own bump script against it. Centralizes the bump-mechanics duplicated near
+  byte-for-byte across mecha-industries repos' `version-bump` jobs (mecha10-assets'
+  release.yml, mecha10-dashboard's main.yml): computing a YY.DAY_OF_YEAR.PATCH CalVer
+  version and deciding whether there's anything new to bump since the last tag. It
+  deliberately does NOT commit, push, tag, create a release, drain a changelog, or notify
+  anything - those stay in the caller. Specifically out of scope and left to the caller:
+
+  The job-level `if:` that skips a run whose own triggering commit is a prior bump (this
+  action has no job-level scope, so that guard cannot move here - the caller must keep it).
+  Self-healing a bump commit that landed without its matching tag, and creating/pushing the
+  real tag once a bump lands - both are tagging-scheme mechanics, which stay business logic
+  per docs/release-conventions.md and vary more than the bump itself. Committing and pushing
+  the bump script's changes - use this org's own `commit-and-push-writeback` action for that
+  (its default `retry-mode: rebase` already matches the fetch+rebase+retry loop these jobs
+  used to hand-roll). Changelog draining, GitHub Release creation, and Slack notification -
+  all pure business logic.
+
+  A minimal caller shape, after this action runs: drain any changelog (if the repo has one),
+  call `commit-and-push-writeback` with the bumped file(s) and `chore: bump version to
+  <new_version>` as the commit message, then tag the resulting HEAD and push the tag.
+
+inputs:
+  current-version-command:
+    description: >
+      Shell command that prints the repo's current version to stdout, e.g. "cat VERSION" or
+      "node -p require('./package.json').version".
+    required: true
+  bump-script:
+    description: Command to invoke with the new version appended as its only argument.
+    required: false
+    default: "./scripts/bump-version.sh"
+  exclude-patterns:
+    description: >
+      Newline- or space-separated extended-grep patterns for commit subjects to exclude when
+      deciding whether anything new has landed since the last tag (e.g. this repo's own bump
+      or status-table commits).
+    required: false
+    default: "chore: bump version"
+
+outputs:
+  bumped:
+    description: "true if a new version was computed and the bump script ran, false if skipped."
+    value: ${{ steps.check.outputs.bumped }}
+  new_version:
+    description: The computed CalVer version string, only set when bumped is true.
+    value: ${{ steps.calver.outputs.new_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check for new commits since last tag
+      id: check
+      shell: bash
+      env:
+        EXCLUDE_PATTERNS: ${{ inputs.exclude-patterns }}
+      run: |
+        set -euo pipefail
+
+        LAST_TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
+        if [[ -z "$LAST_TAG" ]]; then
+          echo "No previous tag found, proceeding with bump"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        LOG=$(git log "${LAST_TAG}..HEAD" --oneline)
+        while IFS= read -r pattern; do
+          [[ -z "$pattern" ]] && continue
+          LOG=$(printf '%s\n' "$LOG" | grep -v -E "$pattern" || true)
+        done <<< "$EXCLUDE_PATTERNS"
+
+        if [[ -z "$LOG" ]]; then
+          echo "No new commits since ${LAST_TAG}, skipping version bump"
+          echo "bumped=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "New commits found since ${LAST_TAG}, proceeding with bump"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Generate CalVer version
+      if: steps.check.outputs.bumped == 'true'
+      id: calver
+      shell: bash
+      env:
+        CURRENT_VERSION_COMMAND: ${{ inputs.current-version-command }}
+      run: |
+        set -euo pipefail
+
+        YEAR=$(date +%y)
+        DAY_OF_YEAR=$(date +%j)
+        CALVER_BASE="${YEAR}.${DAY_OF_YEAR}"
+
+        CURRENT_VERSION=$(eval "$CURRENT_VERSION_COMMAND")
+
+        if [[ "$CURRENT_VERSION" == "${CALVER_BASE}."* ]]; then
+          PATCH=$(echo "$CURRENT_VERSION" | cut -d'.' -f3)
+          if [[ -z "$PATCH" ]]; then
+            PATCH=0
+          fi
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VERSION="${CALVER_BASE}.${NEW_PATCH}"
+        else
+          NEW_VERSION="${CALVER_BASE}.0"
+        fi
+
+        echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+        echo "New version: $NEW_VERSION"
+
+    - name: Run repo's bump script
+      if: steps.check.outputs.bumped == 'true'
+      shell: bash
+      env:
+        BUMP_SCRIPT: ${{ inputs.bump-script }}
+        NEW_VERSION: ${{ steps.calver.outputs.new_version }}
+      run: |
+        set -euo pipefail
+        eval "$BUMP_SCRIPT $NEW_VERSION"
