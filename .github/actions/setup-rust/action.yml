@@ -29,6 +29,24 @@ inputs:
       running both against the same job would duplicate caching work for no benefit.
     required: false
     default: 'true'
+  fast-linker:
+    description: >
+      Install clang + mold (if not already present) and configure cargo to use them as the
+      x86_64-unknown-linux-gnu linker for the rest of the job, by appending
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang and a -C link-arg=-fuse-ld=mold RUSTFLAGS
+      entry to GITHUB_ENV. This used to be a repo-wide .cargo/config.toml override, which forced
+      every contributor's local cargo build to also need clang+mold installed, with a hard link
+      failure if they weren't - so it moved to job-level CI env instead, scoped only to the jobs
+      that actually link (a clippy/cargo-check-only job never links, so it gets no benefit from
+      this). Any RUSTFLAGS value the caller already has, from its own job-level env or an earlier
+      step, is preserved and appended to, never overwritten - a bare replacement would silently
+      change how the caller's crates compile. Only takes effect on x86_64 runners -
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER and the mold linker flag are both an x86_64-
+      unknown-linux-gnu-specific override, and applying the RUSTFLAGS entry unconditionally on a
+      non-x86_64 runner would silently break its link step - so this is a no-op (with a warning)
+      on any other architecture. Leave false for jobs that don't link, or don't need a faster one.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -46,6 +64,36 @@ runs:
           echo "::error::Need to install libudev-dev and no sudo available to do so" >&2
           exit 1
         fi
+
+    - name: Ensure clang + mold are available
+      if: inputs.fast-linker == 'true'
+      shell: bash
+      run: |
+        set -o pipefail
+        if command -v clang >/dev/null 2>&1 && command -v mold >/dev/null 2>&1; then
+          exit 0
+        fi
+        if [ "$(id -u)" -eq 0 ]; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends clang mold
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends clang mold
+        else
+          echo "::error::Need to install clang+mold and no sudo available to do so" >&2
+          exit 1
+        fi
+
+    - name: Configure fast linker (clang + mold)
+      if: inputs.fast-linker == 'true'
+      shell: bash
+      run: |
+        set -o pipefail
+        arch="$(uname -m)"
+        if [ "$arch" != "x86_64" ]; then
+          echo "::warning::fast-linker only applies to x86_64-unknown-linux-gnu; skipping on $arch"
+          exit 0
+        fi
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang" >> "$GITHUB_ENV"
+        echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
