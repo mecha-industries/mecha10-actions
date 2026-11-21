@@ -28,6 +28,8 @@ version bump lands once, not once per repo.
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
 | `.github/actions/cached-script/` | Restores Node/Yarn deps via the sibling `setup-node-yarn` action and runs a cached `yarn <script>` (lint/typecheck/build/test), with an optional script-specific incremental cache layered on top. |
 | `.github/actions/rust-coverage/` | Runs `cargo-llvm-cov` over the workspace (or an affected-crate subset), uploads the lcov + text report, and appends it to the job summary — expects the caller to have already checked out the repo and installed a Rust toolchain. |
+| `.github/actions/rust-fmt/` | Runs `cargo fmt --all --check` (or a crate subset), always with `continue-on-error`, and exposes `outcome`/`report` outputs — expects the caller to have already checked out the repo. |
+| `.github/actions/rust-clippy/` | Runs `cargo clippy --workspace -- -D warnings` (or a crate subset, optionally via the caller's own sccache-fallback script), always with `continue-on-error`, and exposes `outcome`/`report` outputs — expects the caller to have already checked out the repo. |
 | `.github/actions/scan-with-report/` | Runs a yarn report-producing scan script (design-system, dead-code, etc.), posts/updates a sticky PR comment via `danger-js`, and exposes `outcome`/`report`/`groups` outputs. |
 | `.github/actions/setup-node-yarn/` | Checks out the repo, enables Corepack, sets up Node from `package.json`, and restores the Yarn + `node_modules` caches keyed on `yarn.lock`. |
 | `.github/actions/setup-python-uv/` | Installs Python and `uv` (with `astral-sh/setup-uv` caching) — expects the caller to have already checked out the repo. |
@@ -372,6 +374,98 @@ toolchain. It installs its own `dtolnay/rust-toolchain` + sccache steps rather t
 `setup-rust`, to avoid a cross-PR ordering dependency between the two hoists. Callers outside
 mecha10 must either carry the two `scripts/ci/...` helper scripts at their default paths, or
 override `sccache-cache-mode-script`/`cargo-fallback-script` to point at their own equivalents.
+
+### rust-fmt
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+    with:
+      components: rustfmt
+  - id: fmt
+    uses: mecha-industries/mecha10-actions/.github/actions/rust-fmt@main
+
+  - name: Fail on fmt findings
+    if: steps.fmt.outputs.outcome == 'failure'
+    run: exit 1
+```
+
+Inputs:
+- `crate-scope` (default `workspace`) - `workspace` (`cargo fmt --all`) or `subset` (scope to
+  `affected-crates` via repeated `-p <crate>` flags). `cargo fmt` has no `--workspace` flag;
+  `--all` is its equivalent.
+- `affected-crates` (default `''`) - space-separated crate names, consulted only when
+  `crate-scope` is `subset`.
+- `working-directory` (default `.`) - directory to run `cargo fmt` in.
+- `cargo-profile-dev-debug` (default `'0'`) - exported as `CARGO_PROFILE_DEV_DEBUG` for the fmt
+  step; empty leaves the workspace's own `[profile.dev] debug` setting untouched. `cargo fmt
+  --check` never executes a binary, so the workspace's `debug = 1` is pure waste here — a caller
+  that wants that workspace default (mecha10-nodes does) must pass an empty string.
+- `omit-report-on-success` (default `'true'`) - replace a passing run's report output with a
+  placeholder instead of the full (empty) output, to stay under GitHub's 1MB job-outputs cap.
+
+Outputs:
+- `outcome` - `success` or `failure`, the `cargo fmt` step's own outcome.
+- `report` - contents of the `cargo fmt --check` report (or a placeholder).
+
+This action does **not** run `actions/checkout` - same contract as `trivy-scan`, it runs mid-job
+after the caller has already checked out the repo. It never fails the job itself: the `cargo fmt`
+step always runs with `continue-on-error`, so a caller wanting a hard gate must add its own
+`if: steps.<id>.outputs.outcome == 'failure'` -> `exit 1` step, as shown above.
+
+### rust-clippy
+
+```yaml
+steps:
+  - uses: actions/checkout@v7
+  - uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
+    with:
+      components: clippy
+  - id: clippy
+    uses: mecha-industries/mecha10-actions/.github/actions/rust-clippy@main
+
+  - name: Fail on clippy findings
+    if: steps.clippy.outputs.outcome == 'failure'
+    run: exit 1
+```
+
+Inputs:
+- `crate-scope` (default `workspace`) - `workspace` (`cargo clippy --workspace`) or `subset`
+  (scope to `affected-crates` via repeated `-p <crate>` flags). Unlike `cargo fmt`, `cargo clippy`
+  does support `--workspace`.
+- `affected-crates` (default `''`) - space-separated crate names, consulted only when
+  `crate-scope` is `subset`.
+- `working-directory` (default `.`) - directory to run `cargo clippy` in.
+- `cargo-profile-dev-debug` (default `'0'`) - exported as `CARGO_PROFILE_DEV_DEBUG` for the
+  clippy step; empty leaves the workspace's own `[profile.dev] debug` setting untouched. `cargo
+  clippy` only compiles+lints and never executes a binary, so the workspace's `debug = 1` is pure
+  waste here — a caller that wants that workspace default (mecha10-nodes does) must pass an empty
+  string.
+- `omit-report-on-success` (default `'true'`) - replace a passing run's report output with a
+  placeholder instead of the full (empty) output, to stay under GitHub's 1MB job-outputs cap.
+- `sccache-fallback-script` (default `scripts/ci/cargo-with-sccache-fallback.sh`) - path, relative
+  to `working-directory`, to the calling repo's own sccache-wrapping script for the `cargo
+  clippy` invocation. Leave empty to run `cargo clippy` directly with no wrapper.
+
+Outputs:
+- `outcome` - `success` or `failure`, the `cargo clippy` step's own outcome.
+- `report` - contents of the `cargo clippy` report (or a placeholder).
+
+This action does **not** run `actions/checkout` - same contract as `trivy-scan`, it runs mid-job
+after the caller has already checked out the repo. It never fails the job itself: the `cargo
+clippy` step always runs with `continue-on-error`, so a caller wanting a hard gate must add its
+own `if: steps.<id>.outputs.outcome == 'failure'` -> `exit 1` step, as shown above. Internally it
+calls `setup-rust` with `enable-rust-cache: false` and defaults `sccache-fallback-script` to
+`scripts/ci/cargo-with-sccache-fallback.sh` — a caller relying on `Swatinem/rust-cache` for
+clippy needs to know that caching is deliberately off here, unlike this action's own call to
+`setup-rust` for other steps.
+
+Job-level concerns stay with the caller for both actions above: `needs:`/`if:` gating, `runs-on:`,
+`timeout-minutes:`, `permissions:`, and the job's own `outputs:` re-export — a composite action
+cannot contribute to another job's `needs:` graph. mecha10 adopts `rust-clippy` inside a
+`clippy-shard` matrix leg; this action covers the single `cargo clippy` step body shared by every
+shard, not the sharding/matrix machinery itself.
 
 ### scan-with-report
 
