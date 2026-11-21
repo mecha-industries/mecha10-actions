@@ -17,7 +17,7 @@ inputs:
     required: false
     default: "scripts/ci/file-ci-failure-ticket.sh"
   linear-api-key:
-    description: Linear API key, e.g. ${{ secrets.LINEAR_API_KEY }} from the caller.
+    description: Linear API key; the caller passes its secrets.LINEAR_API_KEY.
     required: true
 
 runs:

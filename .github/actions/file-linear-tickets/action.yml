@@ -25,7 +25,7 @@ inputs:
       whole step with an opaque "Argument list too long" (observed on
       mecha10 PR #864). Write the JSON to disk with a `run:` step (no such
       limit there) and pass its path instead, e.g.
-      `${{ runner.temp }}/file-linear-tickets-entries.json`.
+      `$RUNNER_TEMP/file-linear-tickets-entries.json`.
     required: true
   linear-api-key:
     description: Linear GraphQL API key (repo secret), forwarded to the filing script as LINEAR_API_KEY.

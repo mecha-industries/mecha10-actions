@@ -18,8 +18,8 @@ description: >
 inputs:
   gh-pat:
     description: >
-      A PAT (not GITHUB_TOKEN) with Contents: read/write on this repo, passed by the caller
-      as `${{ secrets.GH_PAT }}`. GITHUB_TOKEN cannot push straight past branch protection,
+      A PAT (not GITHUB_TOKEN) with Contents: read/write on this repo; the caller passes its
+      secrets.GH_PAT. GITHUB_TOKEN cannot push straight past branch protection,
       so a composite action step fails loudly here instead of checkout silently falling back
       to GITHUB_TOKEN or failing with an opaque auth error.
     required: true
