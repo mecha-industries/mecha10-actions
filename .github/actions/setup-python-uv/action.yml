@@ -1,9 +1,20 @@
 name: Setup Python and uv
 description: >
-  Installs and caches Python and uv, with the astral-sh/setup-uv main-branch cache fallback.
-  Hoisted from mecha-industries/mecha10's local .github/actions/setup-python-uv action. Like
-  this repo's setup-rust action, this action does NOT run actions/checkout itself - it expects
-  to run mid-job after the calling job has already checked out the repository.
+  Installs and caches Python and uv. Hoisted from mecha-industries/mecha10's local
+  .github/actions/setup-python-uv action. Like this repo's setup-rust action, this action does
+  NOT run actions/checkout itself - it expects to run mid-job after the calling job has already
+  checked out the repository.
+
+  uv is installed via astral.sh's official standalone installer with UV_INSTALL_DIR pinned to a
+  path under $RUNNER_TEMP, NOT via astral-sh/setup-uv. On rootless ARC runners,
+  astral-sh/setup-uv (through @actions/tool-cache's cacheDir) installs to a path derived from
+  RUNNER_TOOL_CACHE, but that env var is read at a point that still resolves to the image-baked,
+  read-only /opt/hostedtoolcache even when a step earlier in this same composite action
+  overrides RUNNER_TOOL_CACHE via GITHUB_ENV - see mecha10-actions PR for the live rerun that
+  proved this (RUNNER_TOOL_CACHE correctly showed the redirected path in the step env, and the
+  very next step still hit `EACCES: permission denied, mkdir '/opt/hostedtoolcache/uv'`). The
+  standalone installer has no such indirection: UV_INSTALL_DIR is read directly by install.sh and
+  controls exactly where the `uv`/`uvx` binaries land, with no tool-cache involvement at all.
 
 inputs:
   python-version:
@@ -12,10 +23,9 @@ inputs:
     default: '3.12'
   cache-prefix:
     description: >
-      Cache key disambiguator for astral-sh/setup-uv (use "main" for the main branch). Passed
-      through as astral-sh/setup-uv's own cache-suffix input - upstream appends it to the cache
-      key rather than prefixing it, but this input keeps its original name since existing callers
-      already pass it. Leave unset/empty to use astral-sh/setup-uv's default cache key.
+      Cache key disambiguator for the uv dependency cache (use "main" for the main branch).
+      Used as part of the actions/cache key for uv's own download/build cache directory. Leave
+      unset/empty to use a cache key with no extra disambiguator.
     required: false
     default: ''
 
@@ -35,8 +45,24 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v5
+    - name: Restore uv cache
+      uses: actions/cache@v4
       with:
-        enable-cache: true
-        cache-suffix: ${{ inputs.cache-prefix }}
+        path: ~/.cache/uv
+        key: >-
+          uv-${{ runner.os }}-${{ inputs.python-version }}-${{ inputs.cache-prefix }}-${{
+          hashFiles('**/uv.lock', '**/pyproject.toml') }}
+        restore-keys: |
+          uv-${{ runner.os }}-${{ inputs.python-version }}-${{ inputs.cache-prefix }}-
+
+    - name: Install uv
+      shell: bash
+      env:
+        UV_INSTALL_DIR: ${{ runner.temp }}/uv-bin
+        UV_NO_MODIFY_PATH: '1'
+      run: |
+        set -euo pipefail
+        mkdir -p "${UV_INSTALL_DIR}"
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        echo "${UV_INSTALL_DIR}" >> "${GITHUB_PATH}"
+        "${UV_INSTALL_DIR}/uv" --version
