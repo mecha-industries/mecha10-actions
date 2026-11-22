@@ -421,10 +421,13 @@ jobs:
 
       - name: Rust coverage (cargo-llvm-cov)
         continue-on-error: true
-        uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage@main
+        uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage-run@main
         with:
           crate-scope: ${{ needs.changes.outputs.crate-scope || 'workspace' }}
           affected-crates: ${{ needs.changes.outputs.affected-crates }}
+          runner: libtest
+          all-features: 'false'
+          output-path: lcov.info
 
       - name: Upload coverage to Codecov
         continue-on-error: true

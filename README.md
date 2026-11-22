@@ -27,7 +27,9 @@ version bump lands once, not once per repo.
 | `.github/actions/file-linear-tickets/` | Files a deduped Linear ticket for every failed entry in a JSON report file, from a single job instead of one ticket-filing step per scan job — hoisted from mecha10/mecha10-api/mecha10-dashboard. |
 | `.github/actions/trivy-scan/` | Runs an Aqua Trivy scan (`vuln` or `secret` mode) against a bare `ubuntu:22.04` container job — replaces the `apt-get install curl ca-certificates` + `aquasecurity/trivy-action@...` steps duplicated verbatim across every consuming repo's `security.yml`/`pr.yml`. |
 | `.github/actions/cached-script/` | Restores Node/Yarn deps via the sibling `setup-node-yarn` action and runs a cached `yarn <script>` (lint/typecheck/build/test), with an optional script-specific incremental cache layered on top. |
-| `.github/actions/rust-coverage/` | Runs `cargo-llvm-cov` over the workspace (or an affected-crate subset), uploads the lcov + text report, and appends it to the job summary — expects the caller to have already checked out the repo and installed a Rust toolchain. |
+| `.github/actions/rust-coverage-collect/` | The "collect" role: runs `cargo-llvm-cov --no-report` inside one shard of a sharded test matrix, as a side effect of tests that must run anyway — expects a later `rust-coverage-report` job to merge the persisted profile data. |
+| `.github/actions/rust-coverage-report/` | The "report" role: a merge-only job that reads already-collected profile data and renders it into `lcov.info` plus a text summary — no compiling, no test execution. |
+| `.github/actions/rust-coverage-run/` | The "run" role: a single-shot, full coverage pass (no sharding, no merge step) — compiles, runs the whole scoped test suite instrumented, and produces `lcov.info` plus a summary in one job. |
 | `.github/actions/rust-fmt/` | Runs `cargo fmt --all --check` (or a crate subset), always with `continue-on-error`, and exposes `outcome`/`report` outputs — expects the caller to have already checked out the repo. |
 | `.github/actions/rust-clippy/` | Runs `cargo clippy --workspace -- -D warnings` (or a crate subset, optionally via the caller's own sccache-fallback script), always with `continue-on-error`, and exposes `outcome`/`report` outputs — expects the caller to have already checked out the repo. |
 | `.github/actions/scan-with-report/` | Runs a yarn report-producing scan script (design-system, dead-code, etc.), posts/updates a sticky PR comment via `danger-js`, and exposes `outcome`/`report`/`groups` outputs. |
@@ -346,34 +348,49 @@ steps already produced in the workspace. `enable-rust-cache` defaults to `true`;
 already manages its own build cache (e.g. via `mozilla-actions/sccache-action`) should pass
 `enable-rust-cache: 'false'`, or drop its own cache step, to avoid two caches competing.
 
-### rust-coverage
+### rust-coverage-run / rust-coverage-collect / rust-coverage-report
+
+Three role-shaped actions replacing the old, zero-consumer `rust-coverage` action (see
+"History" below). None of the three run `actions/checkout`, and `-run`/`-collect` don't install
+a Rust toolchain either — the calling job is expected to have already done both.
+
+`rust-coverage-run` — single-shot, full coverage pass, no sharding:
 
 ```yaml
 steps:
   - uses: actions/checkout@v7
-  - uses: mecha-industries/mecha10-actions/.github/actions/setup-rust@main
-  - uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage@main
+  - uses: dtolnay/rust-toolchain@stable
+  - uses: mecha-industries/mecha10-actions/.github/actions/rust-coverage-run@main
     with:
       crate-scope: workspace
+      runner: libtest
 ```
 
-Inputs:
-- `crate-scope` (required) - `workspace` (run across the whole workspace) or `subset` (narrow to
-  `affected-crates`).
-- `affected-crates` (default `''`) - space-separated crate names to scope to when `crate-scope` is
-  `subset`; ignored otherwise.
-- `sccache-cache-mode-script` (default `scripts/ci/setup-sccache-cache-mode.sh`) - repo-local
-  script that decides sccache's cache dir/mode.
-- `cargo-fallback-script` (default `scripts/ci/cargo-with-sccache-fallback.sh`) - repo-local
-  script that runs a cargo command with sccache, retrying on cache-related failures.
+Inputs: `working-directory` (default `.`), `crate-scope` (required), `affected-crates`
+(default `''`), `runner` (required — `nextest` or `libtest`), `all-features` (default `'true'`),
+`output-path` (default `lcov.info`), `sccache-cache-mode-script`/`cargo-fallback-script`
+(escape hatches, default to the bundled scripts).
 
-No coverage threshold is enforced here - the calling job decides whether to fail on a broken
-instrumented build/test run. Like `setup-rust`, this action does **not** check out the
-repository itself and expects the calling job to have already checked out and installed a Rust
-toolchain. It installs its own `dtolnay/rust-toolchain` + sccache steps rather than delegating to
-`setup-rust`, to avoid a cross-PR ordering dependency between the two hoists. Callers outside
-mecha10 must either carry the two `scripts/ci/...` helper scripts at their default paths, or
-override `sccache-cache-mode-script`/`cargo-fallback-script` to point at their own equivalents.
+`rust-coverage-collect` — runs inside one shard of a sharded test matrix, as a side effect of
+tests that must run anyway (no report produced). Same inputs as `-run` plus `partition` and
+`report-filename`; `runner` defaults to `nextest` here (not required).
+
+`rust-coverage-report` — merge-only job: reads profile data a prior `-collect` job already left
+in `working-directory` and renders `lcov.info` plus a text summary. Deliberately minimal:
+`working-directory` and `output-path` only, no crate-scope/sccache/libudev.
+
+No coverage threshold is enforced by any of the three — the calling job decides whether to fail
+on a broken instrumented build/test run.
+
+**History:** this repo used to also carry a single-shot `rust-coverage` action, hoisted from
+mecha10. It hardcoded one `cargo-llvm-cov` command and encoded a full-instrumented-run design
+that both mecha10 and mecha10-api had already abandoned for measured timeout/eviction reasons;
+two independent adoption attempts declined it. PR #47 replaced it with the three role-shaped
+actions above (adopted in mecha10-api #453 and mecha10 #1894). Its only surviving consumer after
+that was this repo's own `rust-pr.yml` `coverage` job, reached indirectly — a caller only passes
+`enable_coverage: true`, so a plain `uses: .../rust-coverage@` grep across other repos missed
+it. Once that job moved onto `rust-coverage-run`, the old action had zero consumers and was
+deleted.
 
 ### rust-fmt
 
