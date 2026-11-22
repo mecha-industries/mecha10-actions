@@ -1,0 +1,55 @@
+name: Setup sccache cache mode
+description: >
+  Packaging-only wrapper so a plain workflow step can invoke the bundled
+  setup-sccache-cache-mode.sh by `uses:`, instead of a per-repo vendored copy. See
+  run-cargo-with-sccache-fallback/action.yml's description for the full packaging-gap background
+  (mecha10-api PR #454, scripts/ci/SCCACHE-SCRIPTS-MIGRATION-BLOCKED.md) - this action exists for
+  the same reason and shares that one.
+
+  Does not duplicate the script body - it `chmod +x` and `bash`-invokes the exact same file at
+  ${{ github.action_path }}/../rust-coverage-scripts/setup-sccache-cache-mode.sh that
+  rust-coverage-run/collect/report already use. All ~52 real call sites invoke this script with
+  zero arguments, so unlike the cargo-fallback wrapper there is no argv-passthrough input here -
+  it just runs the script and lets it write SCCACHE_DIR/SCCACHE_CACHE_SIZE to $GITHUB_ENV as it
+  already does.
+
+inputs:
+  working-directory:
+    description: >
+      Directory (relative to the caller's checkout root) to run the script in - only matters for
+      its `git rev-parse --show-toplevel`-independent cache-base detection, which doesn't read
+      the working directory, but is exposed for consistency with the other sccache action and in
+      case a future caller's repo layout needs it.
+    required: false
+    default: '.'
+  persistent-mount:
+    description: >
+      Override for SCCACHE_PERSISTENT_MOUNT, passed straight through - production callers never
+      set this (the real runner pool's mount lives at the script's own hardcoded default,
+      /data/sccache). Exists only so a caller's own test harness can point it at a fake, writable
+      directory instead.
+    required: false
+    default: ''
+  sccache-cache-mode-script:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the sccache cache-mode script.
+      Path (relative to the caller's own checkout) to a script to run instead of the bundled
+      scripts/setup-sccache-cache-mode.sh. Leave empty (the default) to use the bundled script.
+      Mirrors the identically-named input on rust-coverage-run/collect/report.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SCCACHE_CACHE_MODE_SCRIPT: ${{ inputs.sccache-cache-mode-script }}
+        BUNDLED_SCCACHE_CACHE_MODE_SCRIPT: ${{ github.action_path }}/../rust-coverage-scripts/setup-sccache-cache-mode.sh
+        SCCACHE_PERSISTENT_MOUNT: ${{ inputs.persistent-mount }}
+      run: |
+        set -euo pipefail
+        script="${SCCACHE_CACHE_MODE_SCRIPT:-$BUNDLED_SCCACHE_CACHE_MODE_SCRIPT}"
+        chmod +x "$script"
+        bash "$script"

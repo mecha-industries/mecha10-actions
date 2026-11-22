@@ -136,3 +136,79 @@ jobs:
           test -s .github/smoke-fixtures/rust-coverage/lcov.info
           test -s .github/smoke-fixtures/rust-coverage/coverage-report.txt
           echo "run smoke test produced a non-empty lcov.info and coverage-report.txt"
+
+  setup-sccache-cache-mode-smoke:
+    # Exercises the new setup-sccache-cache-mode action directly (not from inside
+    # rust-coverage-run/collect/report) - the whole point of this action is to let a plain
+    # workflow step reach scripts/ci's bundled setup-sccache-cache-mode.sh by `uses:`, so this
+    # job has to call it the same way a migrated consumer repo eventually would.
+    name: setup-sccache-cache-mode action smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create a fake persistent mount
+        shell: bash
+        run: mkdir -p "$RUNNER_TEMP/fake-sccache-mount"
+
+      - name: Configure sccache cache mode
+        uses: ./.github/actions/setup-sccache-cache-mode
+        with:
+          persistent-mount: ${{ runner.temp }}/fake-sccache-mount
+
+      - name: Verify SCCACHE_DIR/SCCACHE_CACHE_SIZE were exported
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^SCCACHE_CACHE_SIZE=8G$' "$GITHUB_ENV"
+          grep -q "^SCCACHE_DIR=${RUNNER_TEMP}/fake-sccache-mount/sccache-" "$GITHUB_ENV"
+          echo "setup-sccache-cache-mode action wrote the expected GITHUB_ENV entries"
+
+  run-cargo-with-sccache-fallback-smoke:
+    # Exercises the new run-cargo-with-sccache-fallback action directly against a real `cargo
+    # build`, plus an escape-hatch call that asserts argv (including an embedded-space argument)
+    # survives the action's newline-delimited args -> argv plumbing intact.
+    name: run-cargo-with-sccache-fallback action smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Argument-heavy real cargo build through the wrapper
+        uses: ./.github/actions/run-cargo-with-sccache-fallback
+        with:
+          working-directory: .github/smoke-fixtures/rust-coverage
+          tee-output-path: build-report.txt
+          args: |
+            build
+            -p
+            rust-coverage-smoke-fixture
+            --features
+            extra
+
+      - name: Verify the tee'd build report
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .github/smoke-fixtures/rust-coverage/build-report.txt
+          echo "tee-output-path wrote a non-empty build report"
+
+      - name: Argv preservation through the cargo-fallback-script escape hatch
+        uses: ./.github/actions/run-cargo-with-sccache-fallback
+        with:
+          cargo-fallback-script: .github/smoke-fixtures/sccache-actions/argv-echo-check.sh
+          args: |
+            build
+            -p
+            rust-coverage-smoke-fixture
+            --message
+            hello world
+            --features
+            extra
