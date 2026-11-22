@@ -50,3 +50,89 @@ jobs:
           set -o pipefail
           chmod +x .github/actions/rust-clippy/scripts/cargo-with-sccache-fallback.test.sh
           .github/actions/rust-clippy/scripts/cargo-with-sccache-fallback.test.sh
+
+  rust-coverage-smoke-collect-report:
+    # Exercises the "collect" + "report" coverage roles end-to-end against a tiny throwaway
+    # crate (.github/smoke-fixtures/rust-coverage) - two nextest-sharded collect calls followed
+    # by a report call that merges their profile data into one lcov.info. These two actions had
+    # never run in CI before this job; see rust-coverage-collect/action.yml and
+    # rust-coverage-report/action.yml for why they exist.
+    name: rust-coverage smoke test (collect + report)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Collect shard 1/2
+        uses: ./.github/actions/rust-coverage-collect
+        with:
+          working-directory: .github/smoke-fixtures/rust-coverage
+          crate-scope: workspace
+          runner: nextest
+          partition: count:1/2
+          all-features: true
+          report-filename: test-report-1.txt
+
+      - name: Collect shard 2/2
+        uses: ./.github/actions/rust-coverage-collect
+        with:
+          working-directory: .github/smoke-fixtures/rust-coverage
+          crate-scope: workspace
+          runner: nextest
+          partition: count:2/2
+          all-features: true
+          report-filename: test-report-2.txt
+
+      - name: Report
+        uses: ./.github/actions/rust-coverage-report
+        with:
+          working-directory: .github/smoke-fixtures/rust-coverage
+          output-path: lcov.info
+
+      - name: Verify report output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .github/smoke-fixtures/rust-coverage/lcov.info
+          test -s .github/smoke-fixtures/rust-coverage/coverage-report.txt
+          echo "collect + report smoke test produced a non-empty lcov.info and coverage-report.txt"
+
+  rust-coverage-smoke-run:
+    # Exercises the "run" coverage role (single-shot, no sharding) against the same throwaway
+    # crate, using the default libtest runner specifically - the other job above already
+    # exercises nextest, so between the two jobs both `runner` values actually execute in CI.
+    # This action had never run in CI before this job; see rust-coverage-run/action.yml.
+    name: rust-coverage smoke test (run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Run
+        uses: ./.github/actions/rust-coverage-run
+        with:
+          working-directory: .github/smoke-fixtures/rust-coverage
+          crate-scope: workspace
+          runner: libtest
+          all-features: true
+
+      - name: Verify run output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .github/smoke-fixtures/rust-coverage/lcov.info
+          test -s .github/smoke-fixtures/rust-coverage/coverage-report.txt
+          echo "run smoke test produced a non-empty lcov.info and coverage-report.txt"

@@ -1,0 +1,79 @@
+name: Rust coverage - report (cargo-llvm-cov)
+description: >
+  The "report" role: a merge job that does NOT compile and does NOT execute any tests. It only
+  reads profile data that earlier "collect" jobs (see the rust-coverage-collect action) already
+  wrote into the working directory - e.g. via downloaded shard artifacts merged into
+  target/llvm-cov-target before this action runs - and turns that data into lcov.info plus a
+  human-readable summary. Deliberately minimal: no crate-scope, no cargo-fallback-script, no
+  sccache, no libudev. None of those apply here because nothing in this action's own step
+  compiles or runs a test; `cargo llvm-cov report` only aggregates already-collected profile
+  data. This is the cleanest of the three coverage roles for exactly that reason - keep it that
+  way, don't add inputs "for consistency" with the other two roles.
+
+  Split out of the old mecha10-actions/.github/actions/rust-coverage action (which hardcoded one
+  cargo-llvm-cov command and had zero consumers - both mecha10 and mecha10-api declined to adopt
+  it because it didn't match either repo's actual sharded-nextest coverage design). That action
+  is kept as-is (not deleted, not modified) for reference; this action and its two siblings
+  (rust-coverage-collect, rust-coverage-run) are the role-shaped replacement new callers should
+  use. Like this repo's setup-rust action, this action does NOT run actions/checkout itself.
+
+inputs:
+  working-directory:
+    description: Directory (relative to the caller's checkout root) to run cargo-llvm-cov in.
+    required: false
+    default: '.'
+  output-path:
+    description: Path (relative to working-directory) to write the lcov report to.
+    required: false
+    default: lcov.info
+
+runs:
+  using: composite
+  steps:
+    - name: Cache cargo-llvm-cov binary
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-llvm-cov
+        key: ${{ runner.os }}-cargo-llvm-cov-0.9.1
+
+    - name: Install cargo-llvm-cov
+      shell: bash
+      run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version 0.9.1
+
+    - id: coverage
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        set -o pipefail
+        cargo llvm-cov report --lcov --output-path "$OUTPUT_PATH"
+        cargo llvm-cov report 2>&1 | tee coverage-report.txt
+
+    - name: Upload coverage report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: |
+          ${{ inputs.working-directory }}/coverage-report.txt
+          ${{ inputs.working-directory }}/${{ inputs.output-path }}
+        if-no-files-found: ignore
+        retention-days: 14
+
+    - name: Write job summary
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        {
+          echo '## Rust coverage - report (cargo-llvm-cov)'
+          echo
+          echo '```'
+          if [ -f coverage-report.txt ]; then
+            cat coverage-report.txt
+          else
+            echo '(no report written - see the report job own log)'
+          fi
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"

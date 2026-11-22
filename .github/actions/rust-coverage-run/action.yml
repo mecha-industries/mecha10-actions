@@ -1,0 +1,185 @@
+name: Rust coverage - run (cargo-llvm-cov, single-shot)
+description: >
+  The "run" role: a single-shot, full coverage pass (e.g. a main-branch main.yml job), compiling,
+  running the whole scoped test suite instrumented, and producing lcov.info plus a
+  human-readable summary in one job - no sharding, no separate merge step.
+
+  Matches mecha10 main.yml (`cargo llvm-cov nextest --all-features <scope> --lcov
+  --output-path lcov.info`) and mecha10-api main.yml (`cargo llvm-cov --all-features --workspace
+  --lcov --output-path lcov.info`). Those two differ in which runner drives the tests - mecha10
+  uses nextest, mecha10-api uses cargo's default libtest runner - and that difference is NOT
+  unified here: switching the runner changes which tests actually execute (doctests, harness
+  behavior, etc.), so `runner` is a required input, not a hardcoded choice.
+
+  Split out of the old mecha10-actions/.github/actions/rust-coverage action - see that action's
+  description and rust-coverage-report's for the fuller history. Like this repo's setup-rust
+  action, this action does NOT run actions/checkout itself, and does not install a Rust
+  toolchain - the calling job is expected to have already done both before this step.
+
+inputs:
+  working-directory:
+    description: Directory (relative to the caller's checkout root) to run cargo-llvm-cov in.
+    required: false
+    default: '.'
+  crate-scope:
+    description: >
+      'workspace' (run across the whole workspace) or 'subset' (narrow to affected-crates
+      below).
+    required: true
+  affected-crates:
+    description: >
+      Space-separated crate names to scope to when crate-scope is 'subset'. Ignored (falls
+      back to --workspace) for any other value.
+    required: false
+    default: ''
+  runner:
+    description: >
+      Test runner cargo-llvm-cov should drive - 'nextest' or 'libtest' (cargo's default test
+      runner, invoked with no subcommand). Required - do not default this, the two known
+      callers genuinely disagree and silently picking one would change which tests run for
+      whichever caller didn't ask for it.
+    required: true
+  all-features:
+    description: Pass --all-features. Changes the measured numbers (feature-gated code stops
+      being counted if this is false) - do not flip the default for an existing caller.
+    required: false
+    default: 'true'
+  output-path:
+    description: Path (relative to working-directory) to write the lcov report to.
+    required: false
+    default: lcov.info
+  sccache-cache-mode-script:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the sccache cache-mode
+      script. Path (relative to the caller's own checkout) to a script to run instead of the
+      bundled scripts/setup-sccache-cache-mode.sh. Leave empty (the default) to use the bundled
+      script.
+    required: false
+    default: ''
+  cargo-fallback-script:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the cargo wrapper script.
+      Path (relative to the caller's own checkout) to a script to run instead of the bundled
+      scripts/cargo-with-sccache-fallback.sh. Leave empty (the default) to use the bundled
+      script.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install libudev-dev
+      shell: bash
+      run: |
+        set -o pipefail
+        if [ "$(id -u)" -eq 0 ]; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends libudev-dev
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libudev-dev
+        else
+          echo "::error::Need to install libudev-dev and no sudo available to do so" >&2
+          exit 1
+        fi
+
+    - name: Cache cargo-llvm-cov binary
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-llvm-cov
+        key: ${{ runner.os }}-cargo-llvm-cov-0.9.1
+
+    - name: Install cargo-llvm-cov
+      shell: bash
+      run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version 0.9.1
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ inputs.working-directory }}/target
+        key: ${{ runner.os }}-cargo-coverage-run-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-coverage-run-
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.5
+
+    - name: Configure sccache cache mode
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SCCACHE_CACHE_MODE_SCRIPT: ${{ inputs.sccache-cache-mode-script }}
+        BUNDLED_SCCACHE_CACHE_MODE_SCRIPT: ${{ github.action_path }}/../rust-coverage/scripts/setup-sccache-cache-mode.sh
+      run: |
+        set -euo pipefail
+        script="${SCCACHE_CACHE_MODE_SCRIPT:-$BUNDLED_SCCACHE_CACHE_MODE_SCRIPT}"
+        chmod +x "$script"
+        bash "$script"
+
+    - id: coverage
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CRATE_SCOPE: ${{ inputs.crate-scope }}
+        AFFECTED_CRATES: ${{ inputs.affected-crates }}
+        RUNNER_KIND: ${{ inputs.runner }}
+        ALL_FEATURES: ${{ inputs.all-features }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+        CARGO_FALLBACK_SCRIPT: ${{ inputs.cargo-fallback-script }}
+        BUNDLED_CARGO_FALLBACK_SCRIPT: ${{ github.action_path }}/../rust-coverage/scripts/cargo-with-sccache-fallback.sh
+      run: |
+        set -o pipefail
+        SCOPE_ARGS=(--workspace)
+        if [ "$CRATE_SCOPE" = "subset" ]; then
+          SCOPE_ARGS=()
+          for c in $AFFECTED_CRATES; do
+            SCOPE_ARGS+=(-p "$c")
+          done
+        fi
+
+        ARGS=(llvm-cov)
+        if [ "$RUNNER_KIND" = "nextest" ]; then
+          ARGS+=(nextest)
+        elif [ "$RUNNER_KIND" != "libtest" ]; then
+          echo "::error::runner must be 'nextest' or 'libtest', got '$RUNNER_KIND'" >&2
+          exit 1
+        fi
+        if [ "$ALL_FEATURES" = "true" ]; then
+          ARGS+=(--all-features)
+        fi
+        ARGS+=("${SCOPE_ARGS[@]}")
+        ARGS+=(--lcov --output-path "$OUTPUT_PATH")
+
+        script="${CARGO_FALLBACK_SCRIPT:-$BUNDLED_CARGO_FALLBACK_SCRIPT}"
+        chmod +x "$script"
+        bash "$script" cargo "${ARGS[@]}"
+        cargo llvm-cov report "${SCOPE_ARGS[@]}" 2>&1 | tee coverage-report.txt
+
+    - name: Upload coverage report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: |
+          ${{ inputs.working-directory }}/coverage-report.txt
+          ${{ inputs.working-directory }}/${{ inputs.output-path }}
+        if-no-files-found: ignore
+        retention-days: 14
+
+    - name: Write job summary
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        {
+          echo '## Rust coverage - run (cargo-llvm-cov)'
+          echo
+          echo '```'
+          if [ -f coverage-report.txt ]; then
+            cat coverage-report.txt
+          else
+            echo '(no report written - see the run job own log)'
+          fi
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
