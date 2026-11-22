@@ -625,6 +625,17 @@ both enabled, `HIGH,CRITICAL` severity, deps-gated vuln scan bypassed only on `s
 only the inputs a given repo actually needs to diverge from that baseline - see `security-scan.yml`
 for the complete input list.
 
+### Removed: cache-cleanup.yml
+
+A `cache-cleanup.yml` reusable engine lived here for about a day. It was extracted (#43) from
+four byte-identical weekly-cron caller copies in `mecha10`, `mecha10-api`, `mecha10-dashboard`,
+and `mecha10-rl`. Before any repo adopted the extracted engine, the operator retired all
+scheduled workflow crons org-wide, so all four callers deleted their thin `schedule`/
+`workflow_dispatch` wrapper files instead (mecha10 #1891, mecha10-api #450, mecha10-dashboard
+#974, mecha10-rl #496). With zero consumers and no remaining trigger to call it, the engine
+itself was deleted rather than kept around as untested code — don't re-extract it unless a
+caller with a real cron actually reappears.
+
 ### ⚠️ Required-check naming: branch protection on a reusable-workflow job
 
 A job inside a called reusable workflow is reported to GitHub as
