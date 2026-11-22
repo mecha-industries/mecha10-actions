@@ -22,6 +22,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Redirect tool cache to a writable path
+      shell: bash
+      run: |
+        set -euo pipefail
+        tool_cache_dir="${RUNNER_TEMP}/hostedtoolcache"
+        mkdir -p "${tool_cache_dir}"
+        echo "RUNNER_TOOL_CACHE=${tool_cache_dir}" >> "${GITHUB_ENV}"
+
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
