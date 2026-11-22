@@ -1,0 +1,169 @@
+name: Rust coverage - collect (cargo-llvm-cov, inside a sharded test job)
+description: >
+  The "collect" role: runs inside one shard of a sharded test matrix, where coverage data is a
+  side effect of tests that must run anyway - it does NOT generate a report itself (no
+  --output-path, no lcov.info; pass --no-report). The calling job is expected to persist
+  target/llvm-cov-target (e.g. as a matrix artifact) for a later "report" job
+  (rust-coverage-report) to merge and render.
+
+  Matches mecha10 pr.yml's and mecha10-api pr.yml's sharded coverage test jobs
+  (`cargo llvm-cov --no-report nextest ... --partition "count:<shard>/<shards>"`), which both
+  repos moved to for real measured reasons (api: a ~27-30 min instrumented single-shot run
+  causing repeated 60-min job timeouts; mecha10: runner evictions on a long single-shot run) -
+  this action exists so those two already-correct designs can share code instead of each
+  carrying their own local copy, not so either repo has to change what it already does.
+
+  Split out of the old mecha10-actions/.github/actions/rust-coverage action - see that action's
+  description and rust-coverage-report's for the fuller history. Like this repo's setup-rust
+  action, this action does NOT run actions/checkout itself, and does not install a Rust
+  toolchain - the calling job is expected to have already done both before this step.
+
+inputs:
+  working-directory:
+    description: Directory (relative to the caller's checkout root) to run cargo-llvm-cov in.
+    required: false
+    default: '.'
+  crate-scope:
+    description: >
+      'workspace' (run across the whole workspace) or 'subset' (narrow to affected-crates
+      below).
+    required: true
+  affected-crates:
+    description: >
+      Space-separated crate names to scope to when crate-scope is 'subset'. Ignored (falls
+      back to --workspace) for any other value.
+    required: false
+    default: ''
+  runner:
+    description: Test runner cargo-llvm-cov should drive - 'nextest' or 'libtest'.
+    required: false
+    default: nextest
+  partition:
+    description: >
+      nextest partition expression for this shard, e.g. "count:1/4". Only meaningful when
+      runner is 'nextest' - cargo's default libtest runner has no partition/shard concept, so
+      this is ignored (with a notice) when runner is 'libtest'.
+    required: false
+    default: ''
+  all-features:
+    description: Pass --all-features. Changes the measured numbers (feature-gated code stops
+      being counted if this is false) - do not flip the default for an existing caller.
+    required: false
+    default: 'true'
+  report-filename:
+    description: Filename (written into working-directory) to tee this shard's test output to.
+    required: false
+    default: test-report.txt
+  sccache-cache-mode-script:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the sccache cache-mode
+      script. Path (relative to the caller's own checkout) to a script to run instead of the
+      bundled scripts/setup-sccache-cache-mode.sh. Leave empty (the default) to use the bundled
+      script.
+    required: false
+    default: ''
+  cargo-fallback-script:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the cargo wrapper script.
+      Path (relative to the caller's own checkout) to a script to run instead of the bundled
+      scripts/cargo-with-sccache-fallback.sh. Leave empty (the default) to use the bundled
+      script.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install libudev-dev
+      shell: bash
+      run: |
+        set -o pipefail
+        if [ "$(id -u)" -eq 0 ]; then
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends libudev-dev
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libudev-dev
+        else
+          echo "::error::Need to install libudev-dev and no sudo available to do so" >&2
+          exit 1
+        fi
+
+    - name: Cache cargo-llvm-cov binary
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-llvm-cov
+        key: ${{ runner.os }}-cargo-llvm-cov-0.9.1
+
+    - name: Install cargo-llvm-cov
+      shell: bash
+      run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version 0.9.1
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ inputs.working-directory }}/target
+        key: ${{ runner.os }}-cargo-coverage-collect-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-coverage-collect-
+
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.5
+
+    - name: Configure sccache cache mode
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SCCACHE_CACHE_MODE_SCRIPT: ${{ inputs.sccache-cache-mode-script }}
+        BUNDLED_SCCACHE_CACHE_MODE_SCRIPT: ${{ github.action_path }}/../rust-coverage/scripts/setup-sccache-cache-mode.sh
+      run: |
+        set -euo pipefail
+        script="${SCCACHE_CACHE_MODE_SCRIPT:-$BUNDLED_SCCACHE_CACHE_MODE_SCRIPT}"
+        chmod +x "$script"
+        bash "$script"
+
+    - id: coverage
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CRATE_SCOPE: ${{ inputs.crate-scope }}
+        AFFECTED_CRATES: ${{ inputs.affected-crates }}
+        RUNNER_KIND: ${{ inputs.runner }}
+        PARTITION: ${{ inputs.partition }}
+        ALL_FEATURES: ${{ inputs.all-features }}
+        REPORT_FILENAME: ${{ inputs.report-filename }}
+        CARGO_FALLBACK_SCRIPT: ${{ inputs.cargo-fallback-script }}
+        BUNDLED_CARGO_FALLBACK_SCRIPT: ${{ github.action_path }}/../rust-coverage/scripts/cargo-with-sccache-fallback.sh
+      run: |
+        set -o pipefail
+        SCOPE_ARGS=(--workspace)
+        if [ "$CRATE_SCOPE" = "subset" ]; then
+          SCOPE_ARGS=()
+          for c in $AFFECTED_CRATES; do
+            SCOPE_ARGS+=(-p "$c")
+          done
+        fi
+
+        ARGS=(llvm-cov --no-report)
+        if [ "$RUNNER_KIND" = "nextest" ]; then
+          ARGS+=(nextest)
+        elif [ "$RUNNER_KIND" != "libtest" ]; then
+          echo "::error::runner must be 'nextest' or 'libtest', got '$RUNNER_KIND'" >&2
+          exit 1
+        fi
+        ARGS+=("${SCOPE_ARGS[@]}")
+        if [ "$ALL_FEATURES" = "true" ]; then
+          ARGS+=(--all-features)
+        fi
+        if [ -n "$PARTITION" ]; then
+          if [ "$RUNNER_KIND" = "nextest" ]; then
+            ARGS+=(--partition "$PARTITION")
+          else
+            echo "::notice::partition input is ignored when runner is 'libtest' (cargo's default test runner has no partition concept)" >&2
+          fi
+        fi
+
+        script="${CARGO_FALLBACK_SCRIPT:-$BUNDLED_CARGO_FALLBACK_SCRIPT}"
+        chmod +x "$script"
+        bash "$script" cargo "${ARGS[@]}" 2>&1 | tee "$REPORT_FILENAME"
