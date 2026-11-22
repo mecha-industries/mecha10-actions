@@ -40,10 +40,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          chmod +x .github/actions/rust-coverage/scripts/setup-sccache-cache-mode.test.sh
-          .github/actions/rust-coverage/scripts/setup-sccache-cache-mode.test.sh
-          chmod +x .github/actions/rust-coverage/scripts/cargo-with-sccache-fallback.test.sh
-          .github/actions/rust-coverage/scripts/cargo-with-sccache-fallback.test.sh
+          chmod +x .github/actions/rust-coverage-scripts/setup-sccache-cache-mode.test.sh
+          .github/actions/rust-coverage-scripts/setup-sccache-cache-mode.test.sh
+          chmod +x .github/actions/rust-coverage-scripts/cargo-with-sccache-fallback.test.sh
+          .github/actions/rust-coverage-scripts/cargo-with-sccache-fallback.test.sh
       - name: Run rust-clippy sccache script tests
         shell: bash
         run: |

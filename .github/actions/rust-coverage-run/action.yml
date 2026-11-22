@@ -110,7 +110,7 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       env:
         SCCACHE_CACHE_MODE_SCRIPT: ${{ inputs.sccache-cache-mode-script }}
-        BUNDLED_SCCACHE_CACHE_MODE_SCRIPT: ${{ github.action_path }}/../rust-coverage/scripts/setup-sccache-cache-mode.sh
+        BUNDLED_SCCACHE_CACHE_MODE_SCRIPT: ${{ github.action_path }}/../rust-coverage-scripts/setup-sccache-cache-mode.sh
       run: |
         set -euo pipefail
         script="${SCCACHE_CACHE_MODE_SCRIPT:-$BUNDLED_SCCACHE_CACHE_MODE_SCRIPT}"
@@ -127,7 +127,7 @@ runs:
         ALL_FEATURES: ${{ inputs.all-features }}
         OUTPUT_PATH: ${{ inputs.output-path }}
         CARGO_FALLBACK_SCRIPT: ${{ inputs.cargo-fallback-script }}
-        BUNDLED_CARGO_FALLBACK_SCRIPT: ${{ github.action_path }}/../rust-coverage/scripts/cargo-with-sccache-fallback.sh
+        BUNDLED_CARGO_FALLBACK_SCRIPT: ${{ github.action_path }}/../rust-coverage-scripts/cargo-with-sccache-fallback.sh
       run: |
         set -o pipefail
         SCOPE_ARGS=(--workspace)
