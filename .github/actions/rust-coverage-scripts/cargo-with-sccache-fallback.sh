@@ -72,6 +72,28 @@ config_backup=""
 # (this repo's own rust-coverage action) runs `cargo llvm-cov report` right
 # after, reusing the same profile data target/llvm-cov-target holds, so
 # cleaning it up there would break that follow-up call. See LAB-5254.
+#
+# That same "something later reuses target/llvm-cov-target" situation also
+# applies to the sharded-coverage "collect" role (rust-coverage-collect):
+# `cargo llvm-cov --no-report nextest ... --partition count:N/M` writes raw
+# profile data into target/llvm-cov-target ON PURPOSE, for the calling job
+# to upload as a matrix artifact and a later "report" job
+# (rust-coverage-report) to download and merge - there is no follow-up
+# `cargo llvm-cov report` call in the same job/process to protect it the way
+# rust-coverage-run's is protected above, since the merge happens in a
+# different job entirely. Deleting it here raced that upload step and lost
+# the shard's coverage data for real (mecha10-api PR #453), which is why
+# that repo had to pin a bespoke local copy of this script instead of using
+# the bundled one.
+#
+# CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET is an explicit, opt-IN override
+# that skips the cleanup regardless of argv shape. It defaults to unset/
+# empty, i.e. "cleanup happens" - the exact pre-existing behavior - so no
+# existing caller (rust-coverage-run, any other direct invocation of this
+# script, or either per-repo local copy) changes behavior unless it sets
+# this explicitly. rust-coverage-collect's action.yml sets it to '1' so the
+# collect role gets the preserving behaviour by default without every other
+# caller having to know this variable exists.
 needs_llvm_cov_target_cleanup=0
 saw_llvm_cov=0
 saw_nextest=0
@@ -81,6 +103,9 @@ for arg in "$@"; do
 done
 if [[ "$saw_llvm_cov" -eq 1 && "$saw_nextest" -eq 1 ]]; then
   needs_llvm_cov_target_cleanup=1
+fi
+if [[ "${CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET:-}" == "1" ]]; then
+  needs_llvm_cov_target_cleanup=0
 fi
 
 # shellcheck disable=SC2329,SC2317 # invoked indirectly via the `trap` below

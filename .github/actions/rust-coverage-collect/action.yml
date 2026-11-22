@@ -135,6 +135,12 @@ runs:
         REPORT_FILENAME: ${{ inputs.report-filename }}
         CARGO_FALLBACK_SCRIPT: ${{ inputs.cargo-fallback-script }}
         BUNDLED_CARGO_FALLBACK_SCRIPT: ${{ github.action_path }}/../rust-coverage-scripts/cargo-with-sccache-fallback.sh
+        # The collect role's whole point is to leave target/llvm-cov-target in place for a
+        # later rust-coverage-report job to download and merge - the bundled script's cleanup
+        # trap (meant for one-shot runs) must not fire here. See the script's own comment next
+        # to CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET for the full rationale and why this is
+        # opt-in rather than inferred from argv.
+        CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET: '1'
       run: |
         set -o pipefail
         SCOPE_ARGS=(--workspace)

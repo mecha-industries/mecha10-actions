@@ -466,6 +466,133 @@ else
   fail=1
 fi
 
+# mecha10-api PR #453: the sharded "collect" role runs
+# `cargo llvm-cov --no-report nextest ... --partition count:N/M`, which
+# writes raw profile data into target/llvm-cov-target ON PURPOSE for a later
+# job to download and merge. That caller sets
+# CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET=1 (as rust-coverage-collect's
+# action.yml now does) to opt out of the cleanup above.
+repo_dir17="$work_dir/fake-repo-17"
+mkdir -p "$repo_dir17/target/llvm-cov-target"
+touch "$repo_dir17/target/llvm-cov-target/marker"
+git init -q "$repo_dir17"
+
+fake_cmd17="$work_dir/fake-cmd-17.sh"
+cat > "$fake_cmd17" <<'EOF'
+#!/usr/bin/env bash
+echo "build ok"
+exit 0
+EOF
+chmod +x "$fake_cmd17"
+
+set +e
+out=$(cd "$repo_dir17" && CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET=1 bash "$script" "$fake_cmd17" llvm-cov --no-report nextest --partition count:1/4 2>&1)
+status=$?
+set -e
+if [[ $status -eq 0 ]]; then
+  echo "PASS: exits 0 for a successful collect-role (--no-report nextest) invocation"
+else
+  echo "FAIL: expected exit 0, got $status"
+  fail=1
+fi
+if [[ -d "$repo_dir17/target/llvm-cov-target" ]]; then
+  echo "PASS: preserves target/llvm-cov-target when CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET=1 is set"
+else
+  echo "FAIL: target/llvm-cov-target was removed despite CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET=1"
+  fail=1
+fi
+
+# Same collect-role invocation (--no-report nextest), but on a failing
+# attempt - the preserve opt-out must still hold even when the command
+# fails, since a later shard-upload step still needs the partial profile
+# data either way.
+repo_dir18="$work_dir/fake-repo-18"
+mkdir -p "$repo_dir18/target/llvm-cov-target"
+touch "$repo_dir18/target/llvm-cov-target/marker"
+git init -q "$repo_dir18"
+
+fake_cmd18="$work_dir/fake-cmd-18.sh"
+cat > "$fake_cmd18" <<'EOF'
+#!/usr/bin/env bash
+echo "error[E0308]: mismatched types"
+exit 1
+EOF
+chmod +x "$fake_cmd18"
+
+set +e
+out=$(cd "$repo_dir18" && CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET=1 bash "$script" "$fake_cmd18" llvm-cov --no-report nextest --partition count:1/4 2>&1)
+status=$?
+set -e
+if [[ $status -eq 1 ]]; then
+  echo "PASS: propagates a real failure's exit code for a collect-role invocation"
+else
+  echo "FAIL: expected exit 1, got $status"
+  fail=1
+fi
+if [[ -d "$repo_dir18/target/llvm-cov-target" ]]; then
+  echo "PASS: preserves target/llvm-cov-target on a failed collect-role invocation too"
+else
+  echo "FAIL: target/llvm-cov-target was removed on a failed collect-role invocation"
+  fail=1
+fi
+
+# Without the opt-out env var set, the exact same --no-report nextest argv
+# must fall back to today's existing (pre-fix) behavior: cleanup still
+# fires. This is the "default is unchanged for every existing caller"
+# guarantee - the fix must be opt-in, not inferred from `--no-report` alone.
+repo_dir19="$work_dir/fake-repo-19"
+mkdir -p "$repo_dir19/target/llvm-cov-target"
+touch "$repo_dir19/target/llvm-cov-target/marker"
+git init -q "$repo_dir19"
+
+fake_cmd19="$work_dir/fake-cmd-19.sh"
+cat > "$fake_cmd19" <<'EOF'
+#!/usr/bin/env bash
+echo "build ok"
+exit 0
+EOF
+chmod +x "$fake_cmd19"
+
+set +e
+unset CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET
+out=$(cd "$repo_dir19" && bash "$script" "$fake_cmd19" llvm-cov --no-report nextest --partition count:1/4 2>&1)
+status=$?
+set -e
+if [[ ! -d "$repo_dir19/target/llvm-cov-target" ]]; then
+  echo "PASS: still cleans up target/llvm-cov-target for a --no-report nextest run when the opt-out env var is unset (default unchanged)"
+else
+  echo "FAIL: target/llvm-cov-target survived a --no-report nextest run with the opt-out unset - default behavior changed for existing callers"
+  fail=1
+fi
+
+# A non-'1' value must not be treated as opt-in - only the exact value '1'
+# flips the default, so a caller that accidentally sets this to e.g. 'true'
+# or 'yes' gets the safe (cleanup) behavior instead of silently losing data
+# to a typo'd flag.
+repo_dir20="$work_dir/fake-repo-20"
+mkdir -p "$repo_dir20/target/llvm-cov-target"
+touch "$repo_dir20/target/llvm-cov-target/marker"
+git init -q "$repo_dir20"
+
+fake_cmd20="$work_dir/fake-cmd-20.sh"
+cat > "$fake_cmd20" <<'EOF'
+#!/usr/bin/env bash
+echo "build ok"
+exit 0
+EOF
+chmod +x "$fake_cmd20"
+
+set +e
+out=$(cd "$repo_dir20" && CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET=true bash "$script" "$fake_cmd20" llvm-cov --no-report nextest --partition count:1/4 2>&1)
+status=$?
+set -e
+if [[ ! -d "$repo_dir20/target/llvm-cov-target" ]]; then
+  echo "PASS: treats a non-'1' CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET value as not opted in"
+else
+  echo "FAIL: target/llvm-cov-target was preserved for a non-'1' opt-out value"
+  fail=1
+fi
+
 # A corrupted local registry index cache entry makes cargo misreport a
 # registry-sourced crate as missing from a "path source" (see the script's
 # own comment on PATH_SOURCE_ERROR_PATTERN for the real-world repro: two
