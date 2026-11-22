@@ -1,0 +1,106 @@
+name: Run cargo with sccache fallback
+description: >
+  Packaging-only wrapper so a plain workflow step can invoke the bundled
+  cargo-with-sccache-fallback.sh by `uses:`, instead of a per-repo vendored copy.
+
+  .github/actions/rust-coverage-scripts/ has no action.yml of its own - it's only reachable via
+  github.action_path from INSIDE the composite actions that already bundle it
+  (rust-coverage-run/collect/report, rust-clippy, rust-fmt). mecha10-api PR #454
+  (scripts/ci/SCCACHE-SCRIPTS-MIGRATION-BLOCKED.md) found the script content itself a strict
+  superset of the three per-repo copies (mecha10, mecha10-api, mecha10-nodes) but ruled this
+  packaging gap a hard blocker for migrating any of the ~52 real call sites that invoke it as a
+  plain step, not from inside one of those bundling actions.
+
+  This action does not duplicate the script body - it `chmod +x` and `bash`-invokes the exact
+  same file at ${{ github.action_path }}/../rust-coverage-scripts/cargo-with-sccache-fallback.sh
+  that rust-coverage-run/collect already use, so there is still exactly one copy of the logic.
+
+  Arbitrary argv, not a single shell string: `args` is newline-delimited, one argument per line,
+  so a caller's own `"${SCOPE_ARGS[@]}"`-built array (e.g. `cargo llvm-cov --no-report nextest
+  -p foo -p bar --partition count:3/4`) survives intact with no re-quoting/word-splitting risk -
+  the caller flattens their bash array to one-arg-per-line before calling `uses:`, this action
+  reads it back with `while IFS= read -r`, and the wrapper script receives it as discrete argv
+  elements exactly as if it had been invoked directly as a plain step. A single string input
+  would force either re-splitting on whitespace (breaking any argument containing a space) or
+  shell-`eval`ing the caller's string (a command-injection footgun) - newline-delimited avoids
+  both.
+
+  tee-output-path is here because two of the ~52 call sites (mecha10's doctest step, its
+  cargo-hakari step) pipe this script's combined stdout/stderr into `tee some-report.txt` so a
+  later step can read/upload that file - a plain `uses:` step has no shell of its own to pipe
+  from, so that has to happen inside this action instead.
+
+inputs:
+  args:
+    description: >
+      Newline-delimited cargo subcommand and arguments (one per line, 'cargo' itself is NOT
+      included - this action always prepends it). Example value:
+        llvm-cov
+        nextest
+        --workspace
+        --lcov
+        --output-path
+        lcov.info
+    required: true
+  working-directory:
+    description: Directory (relative to the caller's checkout root) to run cargo in.
+    required: false
+    default: '.'
+  preserve-llvm-cov-target:
+    description: >
+      Set 'true' to skip the wrapper's target/llvm-cov-target cleanup (passed through as
+      CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET) - needed by a sharded "collect" caller that
+      uploads that directory as a matrix artifact for a later job to merge. Leave 'false' (the
+      default) for a single-shot caller.
+    required: false
+    default: 'false'
+  tee-output-path:
+    description: >
+      Optional path (relative to working-directory) to also write the command's combined
+      stdout/stderr to, matching a caller that previously piped the plain-step invocation
+      through `| tee some-report.txt`. Leave empty (the default) to skip.
+    required: false
+    default: ''
+  cargo-fallback-script:
+    description: >
+      Escape hatch for a repo with a genuinely bespoke variant of the cargo wrapper script.
+      Path (relative to the caller's own checkout) to a script to run instead of the bundled
+      scripts/cargo-with-sccache-fallback.sh. Leave empty (the default) to use the bundled
+      script. Mirrors the identically-named input on rust-coverage-run/collect.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CARGO_ARGS_RAW: ${{ inputs.args }}
+        CARGO_FALLBACK_SCRIPT: ${{ inputs.cargo-fallback-script }}
+        BUNDLED_CARGO_FALLBACK_SCRIPT: ${{ github.action_path }}/../rust-coverage-scripts/cargo-with-sccache-fallback.sh
+        CARGO_FALLBACK_PRESERVE_LLVM_COV_TARGET: ${{ inputs.preserve-llvm-cov-target == 'true' && '1' || '' }}
+        TEE_OUTPUT_PATH: ${{ inputs.tee-output-path }}
+      run: |
+        set -euo pipefail
+
+        script="${CARGO_FALLBACK_SCRIPT:-$BUNDLED_CARGO_FALLBACK_SCRIPT}"
+        chmod +x "$script"
+
+        ARGS=()
+        while IFS= read -r line; do
+          [[ -z "$line" ]] && continue
+          ARGS+=("$line")
+        done <<<"$CARGO_ARGS_RAW"
+
+        if [[ "${#ARGS[@]}" -eq 0 ]]; then
+          echo "::error::run-cargo-with-sccache-fallback: 'args' resolved to zero arguments" >&2
+          exit 2
+        fi
+
+        if [[ -n "$TEE_OUTPUT_PATH" ]]; then
+          bash "$script" cargo "${ARGS[@]}" 2>&1 | tee "$TEE_OUTPUT_PATH"
+          exit "${PIPESTATUS[0]}"
+        fi
+
+        bash "$script" cargo "${ARGS[@]}"
