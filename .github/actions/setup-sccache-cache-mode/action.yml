@@ -6,8 +6,9 @@ description: >
   (mecha10-api PR #454, scripts/ci/SCCACHE-SCRIPTS-MIGRATION-BLOCKED.md) - this action exists for
   the same reason and shares that one.
 
-  Does not duplicate the script body - it `chmod +x` and `bash`-invokes the exact same file at
-  ${{ github.action_path }}/../rust-coverage-scripts/setup-sccache-cache-mode.sh that
+  Does not duplicate the script body - it `chmod +x` and `bash`-invokes the exact same file,
+  resolved relative to the action's own path, at
+  ../rust-coverage-scripts/setup-sccache-cache-mode.sh that
   rust-coverage-run/collect/report already use. All ~52 real call sites invoke this script with
   zero arguments, so unlike the cargo-fallback wrapper there is no argv-passthrough input here -
   it just runs the script and lets it write SCCACHE_DIR/SCCACHE_CACHE_SIZE to $GITHUB_ENV as it

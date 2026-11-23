@@ -4,7 +4,8 @@ description: >
   cargo-with-sccache-fallback.sh by `uses:`, instead of a per-repo vendored copy.
 
   .github/actions/rust-coverage-scripts/ has no action.yml of its own - it's only reachable via
-  github.action_path from INSIDE the composite actions that already bundle it
+  the action's own path (the github dot action underscore path context value) from INSIDE the
+  composite actions that already bundle it
   (rust-coverage-run/collect/report, rust-clippy, rust-fmt). mecha10-api PR #454
   (scripts/ci/SCCACHE-SCRIPTS-MIGRATION-BLOCKED.md) found the script content itself a strict
   superset of the three per-repo copies (mecha10, mecha10-api, mecha10-nodes) but ruled this
@@ -12,7 +13,8 @@ description: >
   plain step, not from inside one of those bundling actions.
 
   This action does not duplicate the script body - it `chmod +x` and `bash`-invokes the exact
-  same file at ${{ github.action_path }}/../rust-coverage-scripts/cargo-with-sccache-fallback.sh
+  same file, resolved relative to the action's own path, at
+  ../rust-coverage-scripts/cargo-with-sccache-fallback.sh
   that rust-coverage-run/collect already use, so there is still exactly one copy of the logic.
 
   Arbitrary argv, not a single shell string: `args` is newline-delimited, one argument per line,
