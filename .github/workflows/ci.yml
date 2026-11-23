@@ -161,9 +161,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q '^SCCACHE_CACHE_SIZE=8G$' "$GITHUB_ENV"
-          grep -q "^SCCACHE_DIR=${RUNNER_TEMP}/fake-sccache-mount/sccache-" "$GITHUB_ENV"
-          echo "setup-sccache-cache-mode action wrote the expected GITHUB_ENV entries"
+          # $GITHUB_ENV is a per-step file - the runner applies what the previous step wrote to
+          # it to THIS step's environment, then starts this step with a fresh (empty) file. So
+          # the exported values must be checked via $SCCACHE_CACHE_SIZE/$SCCACHE_DIR here, not by
+          # grepping $GITHUB_ENV again.
+          if [[ "${SCCACHE_CACHE_SIZE:-}" != "8G" ]]; then
+            echo "expected SCCACHE_CACHE_SIZE=8G, got '${SCCACHE_CACHE_SIZE:-<unset>}'" >&2
+            exit 1
+          fi
+          expected_dir_prefix="${RUNNER_TEMP}/fake-sccache-mount/sccache-"
+          if [[ "${SCCACHE_DIR:-}" != "${expected_dir_prefix}"* ]]; then
+            echo "expected SCCACHE_DIR to start with '${expected_dir_prefix}', got '${SCCACHE_DIR:-<unset>}'" >&2
+            exit 1
+          fi
+          echo "setup-sccache-cache-mode action exported the expected SCCACHE_CACHE_SIZE/SCCACHE_DIR"
 
   run-cargo-with-sccache-fallback-smoke:
     # Exercises the new run-cargo-with-sccache-fallback action directly against a real `cargo
