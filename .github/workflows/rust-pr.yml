@@ -87,15 +87,15 @@ on:
         required: false
         default: false
       cargo-fallback-script:
-        description: Path (relative to working-directory) to the repo's cargo-with-sccache-fallback.sh wrapper. Used by the test/doctest/dependency-audit jobs.
+        description: Escape hatch only - path (relative to the caller's checkout) to a repo-local cargo-with-sccache-fallback.sh variant. Leave empty (the default) to use this repo's bundled script via the run-cargo-with-sccache-fallback composite action. Used by the test/doctest/dependency-audit jobs.
         type: string
         required: false
-        default: scripts/ci/cargo-with-sccache-fallback.sh
+        default: ''
       sccache-cache-mode-script:
-        description: Path (relative to working-directory) to the repo's setup-sccache-cache-mode.sh. Used by the test job.
+        description: Escape hatch only - path (relative to the caller's checkout) to a repo-local setup-sccache-cache-mode.sh variant. Leave empty (the default) to use this repo's bundled script via the setup-sccache-cache-mode composite action. Used by the test job.
         type: string
         required: false
-        default: scripts/ci/setup-sccache-cache-mode.sh
+        default: ''
       enable_coverage:
         description: Run cargo-llvm-cov via the rust-coverage composite action and upload to Codecov. Always advisory (continue-on-error) - never wire this into a required check.
         type: boolean
@@ -353,26 +353,39 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.5
 
       - name: Configure sccache cache mode (main writes, branches read-only)
-        run: |
-          chmod +x "${{ inputs.sccache-cache-mode-script }}"
-          "./${{ inputs.sccache-cache-mode-script }}"
+        uses: mecha-industries/mecha10-actions/.github/actions/setup-sccache-cache-mode@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          sccache-cache-mode-script: ${{ inputs.sccache-cache-mode-script }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Compute nextest scope args
+        id: scope
+        run: |
+          {
+            echo "args<<SCOPE_ARGS_EOF"
+            echo "nextest"
+            echo "run"
+            if [ "${{ needs.changes.outputs.crate-scope }}" = "subset" ]; then
+              for c in ${{ needs.changes.outputs.affected-crates }}; do
+                echo "-p"
+                echo "$c"
+              done
+            else
+              echo "--workspace"
+            fi
+            echo "SCOPE_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: cargo nextest run
         id: nextest
-        run: |
-          set -o pipefail
-          chmod +x "${{ inputs.cargo-fallback-script }}"
-          SCOPE_ARGS=(--workspace)
-          if [ "${{ needs.changes.outputs.crate-scope }}" = "subset" ]; then
-            SCOPE_ARGS=()
-            for c in ${{ needs.changes.outputs.affected-crates }}; do
-              SCOPE_ARGS+=(-p "$c")
-            done
-          fi
-          "./${{ inputs.cargo-fallback-script }}" cargo nextest run "${SCOPE_ARGS[@]}"
+        uses: mecha-industries/mecha10-actions/.github/actions/run-cargo-with-sccache-fallback@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          cargo-fallback-script: ${{ inputs.cargo-fallback-script }}
+          args: ${{ steps.scope.outputs.args }}
 
   doctest:
     name: doctest
@@ -402,9 +415,13 @@ jobs:
 
       - name: cargo test --doc
         id: doctest
-        run: |
-          chmod +x "${{ inputs.cargo-fallback-script }}"
-          "./${{ inputs.cargo-fallback-script }}" cargo test --doc
+        uses: mecha-industries/mecha10-actions/.github/actions/run-cargo-with-sccache-fallback@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          cargo-fallback-script: ${{ inputs.cargo-fallback-script }}
+          args: |
+            test
+            --doc
 
   coverage:
     # Advisory only - never return this as part of a required check; it is always
@@ -457,9 +474,12 @@ jobs:
 
       - id: scan
         continue-on-error: true
-        run: |
-          chmod +x "${{ inputs.cargo-fallback-script }}"
-          "./${{ inputs.cargo-fallback-script }}" cargo audit
+        uses: mecha-industries/mecha10-actions/.github/actions/run-cargo-with-sccache-fallback@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          cargo-fallback-script: ${{ inputs.cargo-fallback-script }}
+          args: |
+            audit
 
   cargo-machete:
     # Advisory only - unused-dependency scan, never gates; posts its own sticky PR comment.
