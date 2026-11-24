@@ -9,6 +9,15 @@ allowed by org policy. This repo is different: it's owned by `mecha-industries` 
 `uses: mecha-industries/mecha10-actions/...@<ref>` references from other mecha-industries repos
 are allowed.)
 
+## Scope: mecha-industries only — not consolidated with labone-actions
+
+This repo serves the `mecha-industries` repos only. `PeterChauYEG/labone-actions` is the
+separate equivalent for the `PeterChauYEG`-org repos (consumed by `PeterChauYEG/ops` and
+`PeterChauYEG/gha-runner-docker`). The two are intentionally **not** consolidated, and must not
+be merged or made to consume each other — organizational access/privacy rules govern what can be
+shared across the two GitHub orgs. This is a deliberate boundary, not duplication; please don't
+"fix" it as such.
+
 ## Why this exists
 
 Several near-identical CI steps are copy-pasted across mecha10/mecha10-api/mecha10-dashboard/
