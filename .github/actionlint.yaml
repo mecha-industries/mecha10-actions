@@ -1,0 +1,10 @@
+self-hosted-runner:
+  labels:
+    - self-hosted
+    - catfood
+    - catfood-minimal
+    - catfood-docker
+    - catfood-node
+    - catfood-rust
+    - arc-catfood-minimal
+    - arc-catfood-rust
