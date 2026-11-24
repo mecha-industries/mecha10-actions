@@ -58,7 +58,7 @@ jobs:
     # never run in CI before this job; see rust-coverage-collect/action.yml and
     # rust-coverage-report/action.yml for why they exist.
     name: rust-coverage smoke test (collect + report)
-    runs-on: arc-catfood-minimal
+    runs-on: arc-catfood-rust
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -111,7 +111,7 @@ jobs:
     # exercises nextest, so between the two jobs both `runner` values actually execute in CI.
     # This action had never run in CI before this job; see rust-coverage-run/action.yml.
     name: rust-coverage smoke test (run)
-    runs-on: arc-catfood-minimal
+    runs-on: arc-catfood-rust
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
