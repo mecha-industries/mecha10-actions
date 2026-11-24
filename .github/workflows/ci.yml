@@ -9,7 +9,7 @@ on:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: ubuntu-latest
+    runs-on: arc-catfood-minimal
     steps:
       - uses: actions/checkout@v7
       - name: Run actionlint
@@ -21,7 +21,7 @@ jobs:
 
   shell-script-tests:
     name: shell script tests
-    runs-on: ubuntu-latest
+    runs-on: arc-catfood-minimal
     steps:
       - uses: actions/checkout@v7
       - name: Run notify-slack script tests
@@ -58,7 +58,7 @@ jobs:
     # never run in CI before this job; see rust-coverage-collect/action.yml and
     # rust-coverage-report/action.yml for why they exist.
     name: rust-coverage smoke test (collect + report)
-    runs-on: ubuntu-latest
+    runs-on: arc-catfood-minimal
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -111,7 +111,7 @@ jobs:
     # exercises nextest, so between the two jobs both `runner` values actually execute in CI.
     # This action had never run in CI before this job; see rust-coverage-run/action.yml.
     name: rust-coverage smoke test (run)
-    runs-on: ubuntu-latest
+    runs-on: arc-catfood-minimal
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -143,7 +143,7 @@ jobs:
     # workflow step reach scripts/ci's bundled setup-sccache-cache-mode.sh by `uses:`, so this
     # job has to call it the same way a migrated consumer repo eventually would.
     name: setup-sccache-cache-mode action smoke test
-    runs-on: ubuntu-latest
+    runs-on: arc-catfood-minimal
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -181,7 +181,7 @@ jobs:
     # build`, plus an escape-hatch call that asserts argv (including an embedded-space argument)
     # survives the action's newline-delimited args -> argv plumbing intact.
     name: run-cargo-with-sccache-fallback action smoke test
-    runs-on: ubuntu-latest
+    runs-on: arc-catfood-minimal
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
